@@ -1,0 +1,413 @@
+<script>
+/* ============================================================
+ * 成績登錄編輯器 (GradesEntry.html) — M4
+ * 導師(admin) 與小老師(ta) 共用同一套 UI，差異只在：
+ *   - ta 的學期與科目鎖定為本人（後端 assertExamAccess_ 再驗一次）
+ *   - 場次載入：既有場次 → getExam；新場次 → getRoster（分數空白）
+ *   - 儲存：送完整最終狀態，後端 diff 後只寫變動（決策 D4）
+ * ============================================================ */
+(function () {
+  window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+
+  var TPL = [
+    '<div class="space-y-3">',
+      '<div class="flex gap-3 items-end flex-wrap">',
+        '<div class="w-32"><label class="field-label" for="{{ysem}}">學年學期</label>',
+          '<select id="{{ysem}}" class="field"></select></div>',
+        '<div class="w-44"><label class="field-label" for="{{subj}}">科目</label>',
+          '<select id="{{subj}}" class="field"></select></div>',
+        '<div class="w-72"><label class="field-label" for="{{exam}}">考試場次</label>',
+          '<select id="{{exam}}" class="field"></select></div>',
+        '<div class="w-44"><label class="field-label" for="{{date}}">考試日期</label>',
+          '<input id="{{date}}" type="date" class="field"></div>',
+        '<div class="flex-1 min-w-[220px]"><label class="field-label" for="{{scope}}">考試範圍</label>',
+          '<input id="{{scope}}" class="field" maxlength="60" placeholder="例：第一章～第三章"></div>',
+      '</div>',
+      '<div class="flex gap-2 items-center flex-wrap">',
+        '<button id="{{save}}" class="btn btn-primary">儲存變更</button>',
+        '<button id="{{reload}}" class="btn btn-ghost">重新載入</button>',
+        '<span id="{{stats}}" class="text-sm text-slate-500"></span>',
+      '</div>',
+      '<p id="{{msg}}" class="text-sm hidden"></p>',
+      '<p class="text-sm text-slate-400 leading-relaxed">',
+        '分數須為 <strong>0–100 的整數</strong>或<strong>留空</strong>；留空＝刪除該筆成績。',
+        '儲存時只會寫入有變動的列（先載入原成績再 diff）。',
+        '既有場次的日期與範圍不可修改，需改存「＋ 新場次」。',
+      '</p>',
+      '<div class="tbl-scroll" id="{{wrap}}">',
+        '<table class="tbl">',
+          '<thead><tr><th>座號</th><th>學號</th><th>姓名</th>',
+          '<th style="width:130px;text-align:right">分數</th></tr></thead>',
+          '<tbody id="{{body}}"></tbody>',
+        '</table>',
+      '</div>',
+    '</div>'
+  ].join('');
+
+  /**
+   * 建立一個編輯器實例。
+   * @param {string} rootId 掛載點 id
+   * @param {string} role 'admin' | 'ta'
+   * @return {Object|null} {onShow}
+   */
+  function create(rootId, role) {
+    var root = $(rootId);
+    if (!root) return null;
+
+    var p = rootId + '-';
+    root.innerHTML = TPL.replace(/\{\{(\w+)\}\}/g, function (m, k) { return p + k; });
+    function el(k) { return $(p + k); }
+
+    var st = {
+      ysem: '',
+      subject: '',
+      subjects: [],
+      exams: [],
+      mode: 'new',
+      dirty: false,        // 有未儲存變更
+      busy: false,
+      examValue: '-1',
+      pendingExam: null    // 剛存好的場次（refresh 後自動選回）
+    };
+
+    function msg(text, isErr) {
+      var m = el('msg');
+      if (!text) { m.classList.add('hidden'); return; }
+      m.textContent = text;
+      m.className = 'text-sm ' + (isErr ? 'text-red-600' : 'text-emerald-600');
+    }
+    function stats(t) { el('stats').textContent = t || ''; }
+    function blankTable(t) {
+      el('body').innerHTML = '<tr><td colspan="4" class="empty">' + esc(t) + '</td></tr>';
+      stats('');
+    }
+    function guardDirty() {
+      if (!st.dirty) return true;
+      if (confirm('已修改但尚未儲存，切換將放棄這些變更，確定繼續？')) { st.dirty = false; return true; }
+      return false;
+    }
+
+    /* ---------------- 學期 / 科目 ---------------- */
+    function fillYsem() {
+      var sel = el('ysem');
+      var list = role === 'ta'
+        ? [String((APP.profile && APP.profile.ysem) || '')].filter(Boolean)
+        : (APP.ysems || []).filter(Boolean);
+
+      if (!list.length) {
+        sel.innerHTML = '<option value="">（尚無學期）</option>';
+        sel.disabled = true;
+        st.ysem = '';
+        return false;
+      }
+      sel.disabled = (role === 'ta');
+      var cur = st.ysem || sel.value;
+      sel.innerHTML = list.map(function (y) {
+        return '<option value="' + esc(y) + '"' + (y === cur ? ' selected' : '') + '>' + esc(y) + '</option>';
+      }).join('');
+      st.ysem = sel.value;
+      return true;
+    }
+
+    function loadSubjects() {
+      var sel = el('subj');
+      if (role === 'ta') {
+        var na = (APP.profile && APP.profile.subjectNA) || '';
+        st.subject = (APP.profile && APP.profile.subject) || '';
+        sel.disabled = true;
+        sel.innerHTML = '<option value="' + esc(st.subject) + '">' + esc(na) + '（本科）</option>';
+        return Promise.resolve();
+      }
+      sel.disabled = false;
+      return rpc('listSemesters').then(function (rows) {
+        var y = st.ysem;
+        st.subjects = (rows || []).filter(function (r) { return r.ysem === y; });
+        if (!st.subjects.length) {
+          st.subject = '';
+          sel.innerHTML = '<option value="">（此學期尚無科目）</option>';
+          return;
+        }
+        var cur = st.subject;
+        if (!st.subjects.some(function (r) { return r.subject === cur; })) {
+          cur = st.subjects[0].subject;
+        }
+        sel.innerHTML = st.subjects.map(function (r) {
+          return '<option value="' + esc(r.subject) + '"' + (r.subject === cur ? ' selected' : '') + '>' +
+            esc(r.subjectNA) + '（' + esc(r.subject) + '）</option>';
+        }).join('');
+        st.subject = sel.value;
+      });
+    }
+
+    /* ---------------- 場次 ---------------- */
+    function fillExamSelect(idx) {
+      var sel = el('exam');
+      sel.innerHTML = '<option value="-1">＋ 新場次（輸入日期，範圍可空白）</option>' +
+        st.exams.map(function (e, i) {
+          var label = e.examDate + ' ｜ ' + (e.examScope || '（無範圍）') + ' ｜ ' + e.count + ' 筆';
+          if (e.avg !== null && e.avg !== undefined) label += ' ｜ 平均 ' + e.avg;
+          return '<option value="' + i + '">' + esc(label) + '</option>';
+        }).join('');
+      sel.value = String(idx);
+      if (sel.value === '') sel.value = '-1';
+      st.examValue = sel.value;
+    }
+
+    function loadExams() {
+      if (!st.ysem || !st.subject) {
+        st.exams = [];
+        fillExamSelect(-1);
+        return Promise.resolve();
+      }
+      return rpc('listExams', { ysem: st.ysem, subject: st.subject }).then(function (exams) {
+        st.exams = exams || [];
+        var idx = -1;
+        if (st.pendingExam) {
+          for (var i = 0; i < st.exams.length; i++) {
+            if (st.exams[i].examDate === st.pendingExam.date &&
+                st.exams[i].examScope === st.pendingExam.scope) idx = i;
+          }
+          st.pendingExam = null;
+        }
+        if (idx < 0 && st.exams.length) idx = st.exams.length - 1; // 預設開最新場次
+        fillExamSelect(idx);
+      });
+    }
+
+    /* ---------------- 場次內容載入 ---------------- */
+    function loadExam() {
+      var v = el('exam').value;
+      st.examValue = v;
+      st.dirty = false;
+
+      if (v === '-1') {
+        // 新場次：名單 + 分數全空
+        st.mode = 'new';
+        el('date').disabled = false;
+        el('scope').disabled = false;
+        if (!el('date').value) el('date').value = todayStr();
+        el('scope').value = '';
+        return rpc('getRoster', { ysem: st.ysem }).then(function (roster) {
+          st.rows = (roster || []).map(function (s) {
+            return { seatNo: s.seatNo, studentId: s.studentId, name: s.name, score: null };
+          });
+          if (st.rows.length) { renderRows(); }
+          else { blankTable('此學期尚無學生，請先到「學生資料匯入」匯入名單'); }
+        });
+      }
+
+      var ex = st.exams[Number(v)];
+      if (!ex) return Promise.resolve();
+      st.mode = 'exist';
+      el('date').value = ex.examDate;
+      el('scope').value = ex.examScope;
+      el('date').disabled = true;
+      el('scope').disabled = true;
+      return rpc('getExam', {
+        ysem: st.ysem, subject: st.subject,
+        examDate: ex.examDate, examScope: ex.examScope
+      }).then(function (d) {
+        st.rows = d.rows || [];
+        if (st.rows.length) { renderRows(); }
+        else { blankTable('名單為空，請先匯入學生'); }
+      });
+    }
+
+    /* ---------------- 表格 ---------------- */
+    function renderRows() {
+      if (!st.rows || !st.rows.length) { blankTable('尚無資料'); return; }
+      el('body').innerHTML = st.rows.map(function (r) {
+        return '<tr>' +
+          '<td class="tabular-nums">' + (r.seatNo || '–') + '</td>' +
+          '<td class="font-mono">' + esc(r.studentId) + '</td>' +
+          '<td>' + esc(r.name) + '</td>' +
+          '<td style="text-align:right"><input class="field text-center sc" style="width:86px" ' +
+            'inputmode="numeric" maxlength="3" data-id="' + esc(r.studentId) + '" ' +
+            'value="' + (r.score == null ? '' : esc(r.score)) + '" placeholder="－"></td>' +
+          '</tr>';
+      }).join('');
+      updateStats();
+    }
+
+    function updateStats() {
+      var inputs = el('body').querySelectorAll('input.sc');
+      var filled = 0, sum = 0, bad = 0;
+      for (var i = 0; i < inputs.length; i++) {
+        var v = inputs[i].value.trim();
+        var ok = (v === '') || (/^\d{1,3}$/.test(v) && Number(v) <= 100);
+        if (v !== '' && !ok) {
+          inputs[i].style.borderColor = '#ef4444';
+          inputs[i].style.boxShadow = '0 0 0 2px rgba(239,68,68,.2)';
+          bad++;
+        } else {
+          inputs[i].style.borderColor = '';
+          inputs[i].style.boxShadow = '';
+          if (v !== '') { filled++; sum += Number(v); }
+        }
+      }
+      if (!inputs.length) { stats(''); return; }
+      var t = '共 ' + inputs.length + ' 人，已填 ' + filled + ' 人';
+      if (filled) t += '，平均 ' + (Math.round(sum / filled * 10) / 10);
+      if (bad) t += '，⚠️ ' + bad + ' 筆格式錯誤';
+      stats(t);
+    }
+
+    function collectRows() {
+      var inputs = el('body').querySelectorAll('input.sc');
+      var rows = [], bad = null;
+      for (var i = 0; i < inputs.length; i++) {
+        var id = inputs[i].getAttribute('data-id');
+        var v = inputs[i].value.trim();
+        if (v === '') { rows.push({ studentId: id, score: '' }); continue; } // D9 留空＝刪除
+        if (!/^\d{1,3}$/.test(v) || Number(v) > 100) {
+          var tr = inputs[i].closest('tr');
+          var seat = tr ? tr.cells[0].textContent : String(i + 1);
+          bad = '座號 ' + seat + ' 的分數「' + v + '」不是 0–100 的整數（D12）';
+          break;
+        }
+        rows.push({ studentId: id, score: Number(v) });
+      }
+      if (bad) return { ok: false, msg: bad };
+      if (!rows.length) return { ok: false, msg: '沒有可儲存的成績資料' };
+      return { ok: true, rows: rows };
+    }
+
+    /* ---------------- 儲存 ---------------- */
+    function save() {
+      if (st.busy) return;
+      var date = el('date').value;
+      var scope = el('scope').value.trim();
+      if (!st.ysem || !st.subject) { msg('請先選擇學年學期與科目', true); return; }
+      if (!date) { msg('請選擇考試日期', true); return; }
+      // 考試範圍可空白（規格 4.1-3／4.2-2），僅日期必填
+
+      var c = collectRows();
+      if (!c.ok) { msg(c.msg, true); updateStats(); return; }
+
+      st.busy = true;
+      var btn = el('save');
+      setBusy(btn, true, '儲存中…');
+      rpc('saveExam', {
+        ysem: st.ysem, subject: st.subject,
+        examDate: date, examScope: scope,
+        rows: c.rows
+      }).then(function (d) {
+        st.dirty = false;
+        st.pendingExam = { date: d.examDate, scope: d.examScope };
+        var deduped = d.deduped || 0;
+
+        // 直接以「寫入後由後端重讀」的權威資料渲染，避免再多一次可能讀到舊資料的往返
+        st.mode = 'exist';
+        el('date').value = d.examDate;
+        el('scope').value = d.examScope;
+        el('date').disabled = true;
+        el('scope').disabled = true;
+        st.rows = d.rows || [];
+        if (st.rows.length) renderRows(); else blankTable('名單為空，請先匯入學生');
+
+        var t;
+        if (d.added + d.changed + d.removed + deduped === 0) {
+          t = 'ℹ️ 分數與現況相同，無變動（本場次共 ' + d.count + ' 筆）';
+        } else {
+          t = '✅ 已儲存：新增 ' + d.added + '、更新 ' + d.changed + '、刪除 ' + d.removed +
+              ' 筆' + (deduped ? '（含清理重複列 ' + deduped + ' 筆）' : '') +
+              '；本場次共 ' + d.count + ' 筆' +
+              (d.count ? ('，平均 ' + d.avg + '（最高 ' + d.max + '／最低 ' + d.min + '）') : '');
+        }
+        toast('成績已儲存');
+        return loadExams().then(function () { msg(t, false); }); // 只更新場次下拉的筆數/平均
+      }).catch(function (m) {
+        msg(m, true);
+      }).finally(function () {
+        st.busy = false;
+        setBusy(btn, false);
+      });
+    }
+
+    /* ---------------- 整體重新整理 ---------------- */
+    function refresh() {
+      if (!fillYsem()) {
+        blankTable('尚未建立學年學期');
+        msg('請先到「學期 / TA 密碼」建立學年學期，再回來登錄成績。', true);
+        return Promise.resolve();
+      }
+      return loadSubjects().then(function () {
+        if (!st.subject) {
+          st.exams = [];
+          fillExamSelect(-1);
+          blankTable('此學期尚無科目');
+          msg('請先到「學期 / TA 密碼」建立該學期的科目清單。', true);
+          return;
+        }
+        return loadExams().then(loadExam);
+      }).catch(function (m) { msg(m, true); });
+    }
+
+    /* ---------------- 事件 ---------------- */
+    function bind() {
+      el('ysem').addEventListener('change', function () {
+        if (!guardDirty()) { el('ysem').value = st.ysem; return; }
+        st.ysem = el('ysem').value;
+        st.subject = '';
+        st.pendingExam = null;
+        msg('');
+        refresh();
+      });
+
+      el('subj').addEventListener('change', function () {
+        if (!guardDirty()) { el('subj').value = st.subject; return; }
+        st.subject = el('subj').value;
+        st.pendingExam = null;
+        msg('');
+        loadExams().then(loadExam);
+      });
+
+      el('exam').addEventListener('change', function () {
+        if (!guardDirty()) { el('exam').value = st.examValue; return; }
+        msg('');
+        loadExam();
+      });
+
+      el('save').addEventListener('click', save);
+
+      el('reload').addEventListener('click', function () {
+        if (!guardDirty()) return;
+        msg('');
+        loadExam().then(function () { toast('已重新載入'); });
+      });
+
+      // 分數輸入：髒標記 + 即時統計
+      el('body').addEventListener('input', function (e) {
+        if (e.target && e.target.classList && e.target.classList.contains('sc')) {
+          st.dirty = true;
+          updateStats();
+        }
+      });
+    }
+
+    bind();
+
+    return {
+      onShow: function () {
+        if (st.dirty) {
+          msg('⚠️ 已保留尚未儲存的變更（切換分頁不會清除），按「儲存變更」才會寫入。', true);
+          return;
+        }
+        msg('');
+        refresh();
+      }
+    };
+  }
+
+  /* ---------------- 啟動 ---------------- */
+  var editors = { admin: null, ta: null };
+
+  document.addEventListener('DOMContentLoaded', function () {
+    editors.admin = create('grAdminMount', 'admin');
+    editors.ta = create('grTaMount', 'ta');
+  });
+
+  PANEL_ON_SHOW['admin.grades'] = function () { if (editors.admin) editors.admin.onShow(); };
+  PANEL_ON_SHOW['ta.entry'] = function () { if (editors.ta) editors.ta.onShow(); };
+})();
+</script>

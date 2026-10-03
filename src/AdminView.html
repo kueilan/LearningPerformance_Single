@@ -1,0 +1,399 @@
+<!-- ========== 導師視圖 ========== -->
+<div id="view-admin" class="hidden space-y-6">
+
+  <!-- M2：學期 / TA 密碼 -->
+  <section data-panel="admin.semester" class="card hidden">
+    <div class="card-title">建立學年學期與科目 / TA 密碼</div>
+    <p class="text-sm text-slate-500 mb-4">
+      輸入學年學期（4 碼，例：<code class="bg-slate-100 px-1 rounded">1151</code>），
+      並貼上該學期的科目清單（每行一科，格式：<code class="bg-slate-100 px-1 rounded">代碼, 中文名稱</code>）。
+      程式自動產生 TA 密碼（前 4 碼＝學年學期＋4 碼英數）。<br>
+      重複建立時<strong>既有密碼不會變動</strong>，只會更新科目名稱；本次未列出的既有科目會保留。
+    </p>
+
+    <div class="flex gap-3 items-start flex-wrap">
+      <div class="w-40">
+        <label class="field-label" for="semInput">學年學期</label>
+        <input id="semInput" class="field" placeholder="1151" maxlength="4" inputmode="numeric">
+      </div>
+      <div class="flex-1 min-w-[260px]">
+        <label class="field-label" for="semSubjects">科目清單（可修改後送出）</label>
+        <textarea id="semSubjects" rows="9" class="field font-mono text-sm leading-5"><?!= defaultSubjectsText_() ?></textarea>
+      </div>
+    </div>
+
+    <div class="flex gap-2 items-center mt-3 flex-wrap">
+      <button id="semCreateBtn" class="btn btn-primary">建立 / 更新科目密碼</button>
+      <button id="semExportBtn" class="btn btn-ghost hidden">下載 CSV</button>
+    </div>
+    <p id="semMsg" class="text-sm mt-3 hidden"></p>
+
+    <div class="mt-4 tbl-scroll hidden" id="semTableWrap">
+      <table class="tbl">
+        <thead><tr><th>學年學期</th><th>科目代碼</th><th>科目</th><th>TA 密碼</th></tr></thead>
+        <tbody id="semTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 刪除確認對話框（決策 D15） -->
+  <div id="semConfirm" class="fixed inset-0 z-40 hidden" role="dialog" aria-modal="true">
+    <div class="absolute inset-0 bg-slate-900/50"></div>
+    <div class="relative mx-auto mt-24 w-[min(560px,92vw)] bg-white rounded-xl shadow-2xl p-5">
+      <h3 class="font-bold text-lg mb-1">確認刪除科目</h3>
+      <p id="semConfirmDesc" class="text-sm text-slate-600"></p>
+      <div class="mt-3 tbl-scroll" style="max-height:240px">
+        <table class="tbl">
+          <thead><tr><th>科目</th><th>代碼</th><th class="text-right">成績筆數</th></tr></thead>
+          <tbody id="semConfirmBody"></tbody>
+        </table>
+      </div>
+      <p class="text-sm text-red-600 mt-3 leading-relaxed">
+        ⚠️ 刪除後，上述科目的該學期成績將一併從 Grades 表移除，且 TA 密碼失效。
+        若不慎刪錯，只能從 Google Sheet 的「版本記錄」還原（檔案 → 版本記錄）。
+      </p>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="semConfirmCancel" class="btn btn-ghost">取消</button>
+        <button id="semConfirmOk" class="btn btn-danger">確認刪除並建立</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- M2 互動邏輯 -->
+  <script>
+  (function () {
+    var semRows = [];        // 表格目前顯示的資料（全部學期）
+    var semExportRows = null; // 剛建立的該學期資料（供 CSV 匯出）
+
+    function showMsg(text, isErr) {
+      var m = $('semMsg');
+      if (!text) { m.classList.add('hidden'); return; }
+      m.textContent = text;
+      m.className = 'text-sm mt-3 ' + (isErr ? 'text-red-600' : 'text-emerald-600');
+    }
+
+    function renderSemTable(rows) {
+      var wrap = $('semTableWrap'), body = $('semTableBody');
+      wrap.classList.remove('hidden');
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="4" class="empty">尚未建立任何學期，請輸入 4 碼學年學期後按「建立」</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map(function (r) {
+        return '<tr>' +
+          '<td>' + esc(r.ysem) + '</td>' +
+          '<td class="font-mono">' + esc(r.subject) + '</td>' +
+          '<td>' + esc(r.subjectNA) + '</td>' +
+          '<td class="font-mono font-semibold text-brand-700">' + esc(r.password) + '</td>' +
+          '</tr>';
+      }).join('');
+    }
+
+    /** 重新讀取全部學期並更新下拉選單資料 */
+    function reloadSemesters() {
+      return rpc('listSemesters').then(function (rows) {
+        semRows = rows;
+        renderSemTable(rows);
+        // 同步學期下拉選單（學生匯入面板等會用到）
+        var set = {};
+        rows.forEach(function (r) { set[r.ysem] = 1; });
+        (APP.ysems || []).forEach(function (y) { set[y] = 1; });
+        APP.ysems = Object.keys(set).sort().reverse();
+      });
+    }
+
+    /* 待確認的刪除請求（使用者按下「確認刪除並建立」後重送） */
+    var pendingCreate = null;
+
+    function finishCreate(d) {
+      semExportRows = d.rows;
+      return reloadSemesters().then(function () {
+        var parts = [];
+        parts.push(d.created > 0 ? ('建立 ' + d.created + ' 筆新密碼') : '無新增科目');
+        if (d.reused > 0) parts.push('保留 ' + d.reused + ' 筆既有密碼（未變更）');
+        if (d.renamed > 0) parts.push('更新 ' + d.renamed + ' 筆科目名稱');
+        if (d.deleted > 0) {
+          parts.push('刪除 ' + d.deleted + ' 科' +
+            (d.deletedGrades > 0 ? '（含 ' + d.deletedGrades + ' 筆成績）' : ''));
+        }
+        showMsg((d.created > 0 || d.deleted > 0 ? '✅ ' : 'ℹ️ ') +
+          d.ysem + ' 學期（' + d.subjectCount + ' 科）：' + parts.join('，'));
+        $('semExportBtn').classList.remove('hidden');
+        $('semExportBtn').textContent = '下載 ' + d.ysem + ' TA 密碼 CSV';
+      });
+    }
+
+    /** 彈出刪除確認框（決策 D15） */
+    function showConfirmDialog(d) {
+      var total = d.deletions.reduce(function (s, x) { return s + x.gradeCount; }, 0);
+      $('semConfirmDesc').textContent =
+        '清單中缺少 ' + d.deletions.length + ' 個既有科目，將被刪除（同時建立 ' +
+        d.creates + ' 科、更新 ' + d.renames + ' 科），共會移除 ' + total + ' 筆成績：';
+      $('semConfirmBody').innerHTML = d.deletions.map(function (x) {
+        return '<tr><td>' + esc(x.subjectNA) + '</td>' +
+          '<td class="font-mono">' + esc(x.code) + '</td>' +
+          '<td class="text-right ' + (x.gradeCount > 0 ? 'font-semibold text-red-600' : 'text-slate-400') + '">' +
+          x.gradeCount + ' 筆</td></tr>';
+      }).join('');
+      $('semConfirm').classList.remove('hidden');
+      $('semConfirmOk').focus();
+    }
+
+    function closeConfirmDialog() {
+      $('semConfirm').classList.add('hidden');
+      pendingCreate = null;
+    }
+
+    function startCreate() {
+      var input = $('semInput'), btn = $('semCreateBtn');
+      var ysem = String(input.value || '').trim();
+      if (!/^\d{4}$/.test(ysem)) {
+        showMsg('學年學期格式錯誤：需為 4 碼數字（例：1151）', true);
+        input.focus();
+        return;
+      }
+      var subjectsText = String($('semSubjects').value || '');
+      if (!subjectsText.trim()) {
+        showMsg('科目清單不可為空', true);
+        $('semSubjects').focus();
+        return;
+      }
+      showMsg('');
+      setBusy(btn, true, '檢查中…');
+      rpc('createSemester', { ysem: ysem, subjectsText: subjectsText })
+        .then(function (d) {
+          if (d.needConfirm) {
+            // 有科目將被刪除 → 先確認，不寫入
+            pendingCreate = { ysem: ysem, subjectsText: subjectsText };
+            showConfirmDialog(d);
+            return;
+          }
+          return finishCreate(d);
+        })
+        .catch(function (msg) { showMsg(msg, true); })
+        .finally(function () { setBusy(btn, false); });
+    }
+
+    /** 使用者已確認刪除 → 重送（confirmDelete: true） */
+    function confirmCreate() {
+      if (!pendingCreate) return;
+      var payload = {
+        ysem: pendingCreate.ysem,
+        subjectsText: pendingCreate.subjectsText,
+        confirmDelete: true
+      };
+      $('semConfirm').classList.add('hidden');
+      var btn = $('semCreateBtn');
+      setBusy(btn, true, '刪除中…');
+      rpc('createSemester', payload)
+        .then(function (d) {
+          pendingCreate = null;
+          if (d.needConfirm) return; // 資料期間被變更，重新送出即可
+          return finishCreate(d);
+        })
+        .catch(function (msg) { showMsg(msg, true); })
+        .finally(function () { setBusy(btn, false); });
+    }
+
+    function exportCsv() {
+      var rows = semExportRows && semExportRows.length ? semExportRows : semRows;
+      if (!rows.length) { showMsg('沒有可匯出的資料', true); return; }
+      var ysem = rows[0].ysem;
+      var table = [['學年學期', '科目代碼', '科目', 'TA密碼']];
+      rows.forEach(function (r) {
+        table.push([r.ysem, r.subject, r.subjectNA, r.password]);
+      });
+      downloadCsv('TA密碼_' + ysem + '.csv', table);
+      showMsg('✅ 已下載 CSV（含 BOM，Excel 可直接開啟中文）');
+    }
+
+    /* 事件綁定 */
+    document.addEventListener('DOMContentLoaded', function () {
+      var input = $('semInput');
+      if (!input) return;
+      // 只允許數字
+      input.addEventListener('input', function () {
+        input.value = input.value.replace(/\D/g, '').slice(0, 4);
+      });
+      $('semCreateBtn').addEventListener('click', startCreate);
+      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') startCreate(); });
+      $('semExportBtn').addEventListener('click', exportCsv);
+
+      // 確認對話框
+      $('semConfirmOk').addEventListener('click', confirmCreate);
+      $('semConfirmCancel').addEventListener('click', closeConfirmDialog);
+      document.querySelector('#semConfirm > div').addEventListener('click', closeConfirmDialog); // 點遮罩取消
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && !$('semConfirm').classList.contains('hidden')) closeConfirmDialog();
+      });
+    });
+
+    /* 分頁被切到時載入資料 */
+    window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+    PANEL_ON_SHOW['admin.semester'] = function () { reloadSemesters().catch(function (m) { showMsg(m, true); }); };
+  })();
+  </script>
+
+  <!-- M3：學生匯入 -->
+  <section data-panel="admin.students" class="card hidden">
+    <div class="card-title">學生資料匯入（CSV 快速貼上）</div>
+    <p class="text-sm text-slate-500 mb-4">
+      格式：<code class="bg-slate-100 px-1 rounded">座號, 學號, 姓名, 學生登入驗證碼</code>（免標頭，每行一位學生）
+    </p>
+    <div class="flex gap-2 items-end flex-wrap mb-3">
+      <div>
+        <label class="field-label" for="stuYsem">學年學期</label>
+        <select id="stuYsem" class="field w-36"></select>
+      </div>
+      <button id="stuImportBtn" class="btn btn-primary">匯入</button>
+    </div>
+    <textarea id="stuCsv" rows="8" class="field font-mono text-sm"
+              placeholder="1, 11501, 王小明, ab12cd34&#10;2, 11502, 陳大文, ef56gh78"></textarea>
+    <div id="stuResult" class="mt-3 text-sm hidden"></div>
+    <div class="mt-4 tbl-scroll hidden" id="stuTableWrap">
+      <table class="tbl">
+        <thead><tr><th>座號</th><th>學號</th><th>姓名</th></tr></thead>
+        <tbody id="stuTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- M3 互動邏輯 -->
+  <script>
+  (function () {
+    function showResult(html, isErr) {
+      var el = $('stuResult');
+      if (!html) { el.classList.add('hidden'); return; }
+      el.innerHTML = html;
+      el.className = 'mt-3 text-sm ' + (isErr ? 'text-red-600' : 'text-emerald-600');
+    }
+
+    /** 依 APP.ysems 填充學期下拉（無學期時停用匯入） */
+    function fillYsemSelect() {
+      var sel = $('stuYsem'), btn = $('stuImportBtn');
+      var list = (APP.ysems || []).filter(Boolean);
+      if (!list.length) {
+        sel.innerHTML = '<option value="">（尚無學期，請先至「學期 / TA 密碼」建立）</option>';
+        sel.disabled = true;
+        btn.disabled = true;
+        showResult('尚未建立學年學期，請先到上方「學期 / TA 密碼」分頁建立後再匯入學生。', true);
+        return;
+      }
+      sel.disabled = false;
+      btn.disabled = false;
+      var cur = sel.value;
+      sel.innerHTML = list.map(function (y) {
+        return '<option value="' + esc(y) + '"' + (y === cur ? ' selected' : '') + '>' + esc(y) + '</option>';
+      }).join('');
+    }
+
+    function currentYsem() { return String($('stuYsem').value || '').trim(); }
+
+    function renderRoster(roster) {
+      var wrap = $('stuTableWrap'), body = $('stuTableBody');
+      if (!roster) { wrap.classList.add('hidden'); return; }
+      wrap.classList.remove('hidden');
+      if (!roster.length) {
+        body.innerHTML = '<tr><td colspan="3" class="empty">此學期尚無學生，請貼上 CSV 後按「匯入」</td></tr>';
+        return;
+      }
+      body.innerHTML = roster.map(function (s) {
+        return '<tr>' +
+          '<td class="tabular-nums">' + s.seatNo + '</td>' +
+          '<td class="font-mono">' + esc(s.studentId) + '</td>' +
+          '<td>' + esc(s.name) + '</td>' +
+          '</tr>';
+      }).join('');
+    }
+
+    function loadRoster() {
+      var ysem = currentYsem();
+      if (!ysem) { renderRoster(null); return; }
+      return rpc('getRoster', { ysem: ysem }).then(renderRoster)
+        .catch(function (m) { showResult(esc(m), true); });
+    }
+
+    /** 前端預正規化（BOM / 全形逗號 / Tab / 標頭列 / 空行） */
+    function normalizeFrontend(text) {
+      return String(text || '')
+        .replace(/^\uFEFF/, '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/，/g, ',')
+        .replace(/、/g, ',')
+        .split('\n')
+        .map(function (l) { return l.trim(); })
+        .filter(function (l) { return l; })
+        .filter(function (l, i) {
+          if (i > 0) return true;
+          return !(/座號|學號|seat\s*no|student\s*id/i.test(l) && !/\d/.test(l.split(',')[0]));
+        })
+        .join('\n');
+    }
+
+    function doImport() {
+      var ysem = currentYsem();
+      if (!ysem) { showResult('請先選擇學年學期', true); return; }
+      var text = normalizeFrontend($('stuCsv').value);
+      if (!text) { showResult('請先貼上學生資料（每行：座號, 學號, 姓名, 驗證碼）', true); return; }
+
+      showResult('');
+      var btn = $('stuImportBtn');
+      setBusy(btn, true, '匯入中…');
+      rpc('importStudents', { ysem: ysem, csvText: text })
+        .then(function (d) {
+          if (d.errors && d.errors.length) {
+            var items = d.errors.map(function (e) {
+              var where = e.line > 0 ? ('第 ' + e.line + ' 列') : '整體';
+              return '<li>' + esc(where + '：' + e.msg) + '</li>';
+            }).join('');
+            showResult('<div class="font-semibold mb-1">⛔ 共 ' + d.errors.length +
+              ' 個錯誤，<strong>本次未寫入任何資料</strong>，請修正後重新送出：</div>' +
+              '<ul class="list-disc pl-5 space-y-0.5">' + items + '</ul>', true);
+            return;
+          }
+          showResult('✅ 已匯入 ' + d.parsed + ' 筆（新增 ' + d.created + '、更新 ' +
+            d.updated + '），下方名單已同步更新');
+          renderRoster(d.roster);
+        })
+        .catch(function (m) { showResult(esc(m), true); })
+        .finally(function () { setBusy(btn, false); });
+    }
+
+    /* 事件綁定 */
+    document.addEventListener('DOMContentLoaded', function () {
+      if (!$('stuImportBtn')) return;
+      $('stuImportBtn').addEventListener('click', doImport);
+      $('stuYsem').addEventListener('change', function () {
+        showResult('');
+        loadRoster();
+      });
+    });
+
+    /* 分頁被切到時載入 */
+    window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+    PANEL_ON_SHOW['admin.students'] = function () {
+      fillYsemSelect();
+      loadRoster();
+    };
+  })();
+  </script>
+
+  <!-- M4：成績登記（內容由 GradesEntry.html 產生） -->
+  <section data-panel="admin.grades" class="card hidden">
+    <div class="card-title">成績登記 / 編輯</div>
+    <div id="grAdminMount"></div>
+  </section>
+
+  <!-- M5：綜合查詢（內容由 QueryView.html 產生） -->
+  <section data-panel="admin.query" class="card hidden">
+    <div class="card-title">綜合查詢與匯出</div>
+    <div id="qyAdminMount"></div>
+  </section>
+
+  <!-- M6：成長曲線（內容由 ChartView.html 產生） -->
+  <section data-panel="admin.charts" class="card hidden">
+    <div class="card-title">全班 / 個人成長曲線</div>
+    <div id="chAdminMount"></div>
+  </section>
+
+</div>

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <!-- Tailwind v3（v4 的 oklch 色彩會讓 html2canvas 截圖失敗，見 PLAN §6.3） -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- PDF 匯出（D3）：html2canvas 截圖 → jsPDF 排版，Tailwind 必須鎖 v3.4.16 -->
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: { brand: { 50:'#eff6ff',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8' } } } }
+    };
+  </script>
+  <?!= include_('Styles.html') ?>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen">
+
+  <!-- ========== 登入頁 ========== -->
+  <section id="loginSection" class="min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-md">
+      <div class="text-center mb-6">
+        <h1 class="text-2xl font-bold text-brand-700">導師全班各科學業表現登錄系統</h1>
+      </div>
+
+      <div class="bg-white rounded-xl shadow p-6">
+        <label class="block text-sm font-medium mb-2" for="loginCode">驗證碼</label>
+        <input id="loginCode" type="password" autocomplete="off"
+               placeholder="導師密碼 / TA 密碼 / 學生登入驗證碼"
+               class="w-full border border-slate-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-brand-500">
+        <p id="loginError" class="text-sm text-red-600 mt-2 hidden"></p>
+        <button id="loginBtn"
+                class="w-full mt-4 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-lg px-4 py-2.5 transition">
+          登 入
+        </button>
+        <p class="text-sm text-slate-400 mt-4 leading-relaxed">
+          系統會自動辨識角色：導師密碼、小老師密碼、學生登入驗證碼。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 主應用 ========== -->
+  <section id="appSection" class="hidden">
+    <!-- 頂部列：依角色顯示不同資訊 -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+      <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
+        <h1 class="font-bold text-brand-700">學業表現登錄系統</h1>
+        <span id="roleBadge" class="text-sm font-medium bg-brand-50 text-brand-700 border border-brand-200 rounded-full px-2.5 py-1"></span>
+        <span id="roleLabel" class="text-sm text-slate-600"></span>
+        <button id="logoutBtn" class="ml-auto text-sm text-slate-500 hover:text-red-600 border border-slate-200 rounded-lg px-3 py-1.5">
+          登出
+        </button>
+      </div>
+      <!-- 角色導覽列（各視圖自行渲染） -->
+      <nav id="roleNav" class="max-w-6xl mx-auto px-4"></nav>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-4 py-6">
+      <?!= include_('AdminView') ?>
+      <?!= include_('TAView') ?>
+      <?!= include_('StudentView') ?>
+      <?!= include_('GradesEntry') ?>
+      <?!= include_('QueryView') ?>
+      <?!= include_('ChartView') ?>
+    </main>
+  </section>
+
+  <!-- Toast 提示 -->
+  <div id="toast" class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 hidden">
+    <div id="toastMsg" class="bg-slate-800 text-white text-sm rounded-lg px-4 py-2.5 shadow-lg"></div>
+  </div>
+
+  <?!= include_('Common') ?>
+</body>
+</html>

@@ -1,0 +1,327 @@
+<script>
+/* ============================================================
+ * 共用前端核心 (Common.html)
+ * - rpc()：包裝 google.script.run 為 Promise
+ * - session：token/profile 存 sessionStorage
+ * - 導覽列切換、Toast、CSV 下載等工具
+ * ============================================================ */
+
+var APP = { token: null, profile: null, tab: null };
+var SESSION_KEY = 'LP_SESSION';
+
+/* ---------- 基本 DOM 工具 ---------- */
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+var toastTimer = null;
+function toast(msg, ms) {
+  var t = $('toast'), m = $('toastMsg');
+  if (!t) return;
+  m.textContent = msg;
+  t.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.classList.add('hidden'); }, ms || 2600);
+}
+
+/* ---------- RPC ---------- */
+/**
+ * 呼叫後端 api()。
+ * @param {string} action
+ * @param {Object} payload
+ * @return {Promise<any>} resolve 為 data；reject 為錯誤訊息字串
+ */
+function rpc(action, payload) {
+  payload = payload || {};
+  if (APP.token) payload.token = APP.token;
+  return new Promise(function (resolve, reject) {
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res) { reject('伺服器無回應'); return; }
+        if (res.ok === false) { reject(res.msg || '請求失敗'); return; }
+        resolve(res.data);
+      })
+      .withFailureHandler(function (err) {
+        reject((err && err.message) ? err.message : String(err));
+      })
+      .api(action, payload);
+  });
+}
+
+/* ---------- Session ---------- */
+function saveSession() {
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify({ t: APP.token, p: APP.profile })); } catch (e) {}
+}
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+}
+function loadSession() {
+  try {
+    var raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    if (!o || !o.t) return null;
+    APP.token = o.t; APP.profile = o.p;
+    return o;
+  } catch (e) { return null; }
+}
+
+/* ---------- 各角色導覽列定義 ---------- */
+var NAV = {
+  admin: [
+    { id: 'admin.semester',  label: '學期 / TA 密碼' },
+    { id: 'admin.students',  label: '學生資料匯入' },
+    { id: 'admin.grades',    label: '成績登記' },
+    { id: 'admin.query',     label: '綜合查詢 / 匯出' },
+    { id: 'admin.charts',    label: '成長曲線圖' }
+  ],
+  ta: [
+    { id: 'ta.entry',        label: '本科成績登錄' }
+  ],
+  student: [
+    { id: 'stu.records',     label: '歷次成績' },
+    { id: 'stu.charts',      label: '成長曲線圖' }
+  ]
+};
+
+var ROLE_BADGE = { admin: '導師', ta: '小老師', student: '學生 / 家長' };
+
+/* ---------- 視圖 / 分頁切換 ---------- */
+function showApp() {
+  $('loginSection').classList.add('hidden');
+  $('appSection').classList.remove('hidden');
+  $('roleBadge').textContent = ROLE_BADGE[APP.profile.role] || APP.profile.role;
+  $('roleLabel').textContent = APP.profile.label || '';
+  renderNav();
+  // 隱藏三角色容器，只顯示自己的
+  ['view-admin', 'view-ta', 'view-student'].forEach(function (id) {
+    var el = $(id); if (el) el.classList.add('hidden');
+  });
+  var mine = 'view-' + (APP.profile.role === 'student' ? 'student' : APP.profile.role);
+  if ($(mine)) $(mine).classList.remove('hidden');
+  var items = NAV[APP.profile.role] || [];
+  if (items.length) switchTab(items[0].id);
+}
+
+function showLogin() {
+  $('appSection').classList.add('hidden');
+  $('loginSection').classList.remove('hidden');
+  $('loginCode').value = '';
+  $('loginError').classList.add('hidden');
+}
+
+function renderNav() {
+  var items = NAV[APP.profile.role] || [];
+  var nav = $('roleNav');
+  if (items.length <= 1) { nav.innerHTML = ''; nav.className = 'max-w-6xl mx-auto px-4'; return; }
+  nav.className = 'max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto border-t border-slate-100';
+  nav.innerHTML = items.map(function (it) {
+    return '<button class="tab-btn" data-tab="' + it.id + '">' + esc(it.label) + '</button>';
+  }).join('');
+  Array.prototype.forEach.call(nav.querySelectorAll('.tab-btn'), function (b) {
+    b.addEventListener('click', function () { switchTab(b.getAttribute('data-tab')); });
+  });
+}
+
+function switchTab(tabId) {
+  APP.tab = tabId;
+  var nav = $('roleNav');
+  Array.prototype.forEach.call(nav.querySelectorAll('.tab-btn'), function (b) {
+    b.classList.toggle('active', b.getAttribute('data-tab') === tabId);
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('[data-panel]'), function (p) {
+    p.classList.toggle('hidden', p.getAttribute('data-panel') !== tabId);
+  });
+  // 通知視圖層（M2+ 各面板掛 onShow）
+  if (window.PANEL_ON_SHOW && PANEL_ON_SHOW[tabId]) PANEL_ON_SHOW[tabId]();
+}
+
+/* ---------- 登入 / 登出 ---------- */
+function doLogin() {
+  var code = $('loginCode').value.trim();
+  var err = $('loginError');
+  if (!code) { err.textContent = '請輸入驗證碼'; err.classList.remove('hidden'); return; }
+  err.classList.add('hidden');
+  $('loginBtn').disabled = true;
+  rpc('login', { code: code }).then(function (data) {
+    APP.token = data.token;
+    APP.profile = data.profile;
+    saveSession();
+    return rpc('bootstrap');
+  }).then(function (bs) {
+    APP.ysems = bs.ysems || [];
+    showApp();
+    toast('歡迎，' + (APP.profile.label || ''));
+  }).catch(function (msg) {
+    err.textContent = msg; err.classList.remove('hidden');
+  }).finally(function () {
+    $('loginBtn').disabled = false;
+  });
+}
+
+function doLogout() {
+  var t = APP.token;
+  APP.token = null; APP.profile = null;
+  clearSession();
+  showLogin();
+  if (t) rpc('logout', { token: t }).catch(function () {});
+}
+
+/* ---------- 通用工具 ---------- */
+/** YYYY-MM-DD (民國可另擴充) */
+function todayStr() {
+  var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+/** 下載 CSV（含 BOM，Excel 中文不亂碼） */
+function downloadCsv(filename, rows) {
+  var lines = rows.map(function (cols) {
+    return cols.map(function (v) {
+      var s = String(v == null ? '' : v);
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',');
+  });
+  var blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+/** 按鈕忙碌狀態 */
+function setBusy(btn, busy, busyText) {
+  if (!btn) return;
+  if (busy) {
+    btn.dataset.text = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> ' + esc(busyText || '處理中…');
+  } else {
+    btn.disabled = false;
+    btn.textContent = btn.dataset.text || btn.textContent;
+  }
+}
+
+/**
+ * 匯出 PDF（D3）：html2canvas 把表格 DOM 轉影像 → jsPDF 逐頁排版。
+ * 中文 100% 還原（jsPDF 內建字型不支援中文，故採截圖法）。
+ *
+ * 依 chunk 列分批截圖，避免一次截取整張大表導致記憶體過高（PLAN §6.3）。
+ *
+ * @param {{filename:string, title:string, subtitle:string,
+ *          headers:string[], aligns:string[], rows:Array, chunk:number}} opts
+ * @return {Promise<void>} 完成時已觸發下載
+ */
+function exportPdf(opts) {
+  if (typeof html2canvas === 'undefined' || !window.jspdf || !window.jspdf.jsPDF) {
+    return Promise.reject('PDF 元件尚未載入完成，請重新整理頁面後再試');
+  }
+  var jsPDF = window.jspdf.jsPDF;
+  var pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  var A4_W = 210, A4_H = 297;
+  var chunk = Math.max(1, opts.chunk || 30);
+  var rows = opts.rows || [];
+  var total = rows.length;
+  var headers = opts.headers || [];
+  var aligns = opts.aligns || [];
+  var FF = "Arial,'Microsoft JhengHei',sans-serif"; // 中文字型（截圖法，由瀏覽器渲染）
+
+  function alignOf(i) { return aligns[i] === 'r' ? 'right' : 'left'; }
+
+  var host = document.createElement('div');
+  host.style.cssText = 'position:absolute;left:-10000px;top:0;background:#fff;';
+  document.body.appendChild(host);
+
+  function pageHtml(from, to, idx, pageCount) {
+    var th = '', trs = '', c;
+    for (c = 0; c < headers.length; c++) {
+      th += '<th style="background:#f1f5f9;border:1px solid #cbd5e1;padding:6px 8px;text-align:' +
+        alignOf(c) + ';font:bold 12px ' + FF + ';color:#111;white-space:nowrap">' +
+        esc(headers[c]) + '</th>';
+    }
+    for (var i = from; i < to; i++) {
+      var tds = '';
+      for (c = 0; c < headers.length; c++) {
+        var v = rows[i][c];
+        v = (v === null || v === undefined) ? '' : v;
+        tds += '<td style="border:1px solid #e2e8f0;padding:5px 8px;font:12px ' + FF +
+          ';color:#111;text-align:' + alignOf(c) + '">' + esc(v) + '</td>';
+      }
+      trs += '<tr>' + tds + '</tr>';
+    }
+    if (!total) {
+      trs = '<tr><td colspan="' + headers.length +
+        '" style="border:1px solid #e2e8f0;padding:24px;text-align:center;color:#666;font:13px ' +
+        FF + '">查無資料</td></tr>';
+    }
+
+    return '<div style="padding:18px 20px;background:#fff;width:720px">' +
+      '<div style="font:bold 17px/1.4 ' + FF + ';color:#111">' + esc(opts.title || '查詢結果') + '</div>' +
+      '<div style="font:12px/1.6 ' + FF + ';color:#444;margin-top:4px">' + esc(opts.subtitle || '') + '</div>' +
+      '<div style="font:11px/1.6 ' + FF + ';color:#777;text-align:right">第 ' + (idx + 1) + ' / ' +
+      pageCount + ' 頁　產生時間 ' + esc(new Date().toLocaleString('zh-TW')) + '</div>' +
+      '<table style="border-collapse:collapse;width:100%;margin-top:10px">' +
+      '<thead><tr>' + th + '</tr></thead><tbody>' + trs + '</tbody></table></div>';
+  }
+
+  var pageCount = Math.max(1, Math.ceil(total / chunk));
+  var chain = Promise.resolve();
+
+  for (var pg = 0; pg < pageCount; pg++) {
+    (function (idx) {
+      chain = chain.then(function () {
+        host.innerHTML = pageHtml(idx * chunk, Math.min((idx + 1) * chunk, total), idx, pageCount);
+        var node = host.firstChild;
+        return html2canvas(node, { scale: 2, backgroundColor: '#ffffff' }).then(function (canvas) {
+          if (idx > 0) pdf.addPage();
+          var ratio = canvas.height / canvas.width;
+          var w = A4_W, h = A4_W * ratio;
+          if (h > A4_H) { h = A4_H; w = A4_H / ratio; }
+          pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG',
+            (A4_W - w) / 2, (A4_H - h) / 2, w, h);
+          host.innerHTML = '';
+        });
+      });
+    })(pg);
+  }
+
+  return chain.then(function () {
+    if (host.parentNode) host.parentNode.removeChild(host);
+    pdf.save(opts.filename || 'report.pdf');
+  }).catch(function (e) {
+    if (host.parentNode) host.parentNode.removeChild(host);
+    throw (e && e.message) ? e.message : String(e);
+  });
+}
+
+
+/* ---------- 啟動 ---------- */
+window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+
+document.addEventListener('DOMContentLoaded', function () {
+  // 登入按鈕
+  var lb = $('loginBtn');
+  if (lb) lb.addEventListener('click', doLogin);
+  var li = $('loginCode');
+  if (li) li.addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+  var lo = $('logoutBtn');
+  if (lo) lo.addEventListener('click', doLogout);
+
+  // 還原 session
+  if (loadSession()) {
+    rpc('bootstrap').then(function (bs) {
+      APP.ysems = bs.ysems || [];
+      APP.profile = bs.profile || APP.profile;
+      showApp();
+    }).catch(function () {
+      clearSession(); APP.token = null; showLogin();
+    });
+  } else {
+    showLogin();
+  }
+});
+</script>

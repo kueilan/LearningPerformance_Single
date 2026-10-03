@@ -1,0 +1,457 @@
+<script>
+/* ============================================================
+ * 成長曲線圖 (ChartView.html) — M6
+ * 導師(admin) 與 學生/家長(student) 共用同一套 UI：
+ *   - admin   ：學年學期 + 檢視模式(個人/全班) + 學生 + 科目
+ *               全班模式＝須選單一科目，每位學生一張子圖（D10）
+ *   - student ：僅學年學期，自動生成所有有成績紀錄的科目（規格 4.3-3）
+ * 三色規則（規格 4.1-5 / 4.3-3）：
+ *   綠＝全班平均線、藍＝成績 ≥ 班平均、紅＝成績 < 班平均；Y 軸固定 0–100
+ * ============================================================ */
+(function () {
+  window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+
+  var GREEN = '#16a34a'; // 全班平均線
+  var BLUE  = '#2563eb'; // 高於（含等於）班平均
+  var RED   = '#dc2626'; // 低於班平均
+  var GREY  = '#cbd5e1'; // 無平均可比時的中性色
+
+  function pad2(n) {
+    n = Number(n) || 0;
+    return n < 10 ? '0' + n : String(n);
+  }
+
+  /**
+   * 建立圖表面板實例。
+   * @param {string} rootId 掛載點 id
+   * @param {string} role 'admin' | 'student'
+   * @return {Object|null} {onShow}
+   */
+  function create(rootId, role) {
+    var root = $(rootId);
+    if (!root) return null;
+
+    var p = rootId + '-';
+
+    var modeCtl = role === 'student' ? '' :
+      '<div class="w-52"><label class="field-label" for="' + p + 'mode">檢視模式</label>' +
+        '<select id="' + p + 'mode" class="field">' +
+          '<option value="personal">個人（單一學生）</option>' +
+          '<option value="class">全班（每位學生一子圖）</option>' +
+        '</select></div>';
+
+    var stuCtl = role === 'student' ? '' :
+      '<div class="w-60" id="' + p + 'stuWrap"><label class="field-label" for="' + p + 'stu">學生</label>' +
+        '<select id="' + p + 'stu" class="field"></select></div>';
+
+    // 規格 4.3-3：學生端查詢條件只有學年學期，科目自動全生成
+    var subjCtl = role === 'student' ? '' :
+      '<div class="w-44"><label class="field-label" for="' + p + 'subj">科目</label>' +
+        '<select id="' + p + 'subj" class="field"><option value="">全部科目</option></select></div>';
+
+    root.innerHTML = [
+      '<div class="space-y-3">',
+        '<div class="flex gap-3 items-end flex-wrap">',
+          '<div class="w-32"><label class="field-label" for="' + p + 'ysem">學年學期</label>',
+            '<select id="' + p + 'ysem" class="field"></select></div>',
+          modeCtl, stuCtl, subjCtl,
+          '<button id="' + p + 'go" class="btn btn-primary">產生圖表</button>',
+        '</div>',
+        '<p id="' + p + 'msg" class="text-sm hidden"></p>',
+        '<p class="text-sm text-slate-400">',
+          '<span class="legend-dot" style="background:' + GREEN + '"></span>全班平均',
+          '<span class="legend-dot" style="background:' + BLUE + '"></span>高於平均（藍）',
+          '<span class="legend-dot" style="background:' + RED + '"></span>低於平均（紅）',
+          '<span class="text-slate-300">　｜　</span>縱軸固定 0–100 分，橫軸為考試日期（時間序）',
+        '</p>',
+        '<p id="' + p + 'cap" class="text-sm text-slate-500 hidden"></p>',
+        '<div class="grid gap-4 md:grid-cols-2" id="' + p + 'grid"></div>',
+      '</div>'
+    ].join('');
+
+    function el(k) { return $(p + k); }
+
+    var st = { subjects: [], roster: [], busy: false };
+    var io = null;
+    var nodes = [];
+
+    /** 忙碌視窗：防止重疊請求（舊回包覆蓋新結果）＋ 保存按鈕原文案 */
+    function busy(on) {
+      st.busy = on;
+      setBusy(el('go'), on, '產生中…');
+    }
+
+    /* ---------- 控制項 ---------- */
+    function msg(text, isErr) {
+      var m = el('msg');
+      if (!text) { m.classList.add('hidden'); m.textContent = ''; return; }
+      m.className = 'text-sm ' + (isErr ? 'text-red-600' : 'text-slate-600');
+      m.textContent = text;
+      m.classList.remove('hidden');
+    }
+
+    function fillYsem() {
+      var sel = el('ysem');
+      var list = (APP.ysems || []).filter(function (y) { return !!y; });
+      var prev = sel.value;
+      sel.innerHTML = list.length
+        ? list.map(function (y) { return '<option value="' + esc(y) + '">' + esc(y) + '</option>'; }).join('')
+        : '<option value="">（尚無學期）</option>';
+      if (prev && list.indexOf(prev) >= 0) sel.value = prev;
+      el('go').disabled = !list.length;
+    }
+
+    function fillSubjects(list, keep) {
+      var sel = el('subj');
+      if (!sel) return;
+      var prev = keep || sel.value;
+      st.subjects = list || [];
+      sel.innerHTML = '<option value="">全部科目</option>' + st.subjects.map(function (s) {
+        return '<option value="' + esc(s.code) + '">' + esc(s.na) + '</option>';
+      }).join('');
+      if (prev && st.subjects.some(function (s) { return s.code === prev; })) sel.value = prev;
+      else sel.value = '';
+    }
+
+    function fillRoster(list, activeId) {
+      var sel = el('stu');
+      if (!sel) return;
+      var prev = activeId || sel.value;
+      st.roster = list || [];
+      sel.innerHTML = st.roster.length
+        ? st.roster.map(function (s) {
+            var lab = pad2(s.seatNo) + '　' + s.studentId + '　' + s.name;
+            return '<option value="' + esc(s.studentId) + '">' + esc(lab) + '</option>';
+          }).join('')
+        : '<option value="">（尚無學生）</option>';
+      if (prev && st.roster.some(function (s) { return s.studentId === prev; })) sel.value = prev;
+      else if (st.roster.length) sel.value = st.roster[0].studentId;
+    }
+
+    function subjectLabel(code) {
+      var hit = st.subjects.filter(function (s) { return s.code === code; })[0];
+      return hit ? hit.na : code;
+    }
+
+    function currentMode() {
+      return (role === 'student' || !el('mode')) ? 'personal' : el('mode').value;
+    }
+
+    /* ---------- 查詢 ---------- */
+    function fetchChart(mode, subj, stu) {
+      return rpc('chartData', {
+        ysem: el('ysem').value,
+        mode: mode,
+        subject: subj,
+        studentId: stu
+      });
+    }
+
+    function run() {
+      if (st.busy) return Promise.resolve();
+      var ysem = el('ysem').value;
+      if (!ysem) {
+        msg('尚無學年學期，請先至「學期 / TA 密碼」建立', true);
+        clearGrid('尚無學年學期');
+        return Promise.resolve();
+      }
+
+      var mode = currentMode();
+      var subj = el('subj') ? el('subj').value : '';
+      var stu = (role === 'student' || !el('stu')) ? '' : el('stu').value;
+
+      if (mode === 'class' && !subj) {
+        // 科目下拉還沒載入本學期清單（初次進入或切換學期）→ 先用個人模式取回
+        if (!st.subjects.length) return metaThenClass();
+        msg('全班模式請先選擇單一科目', true);
+        return Promise.resolve();
+      }
+
+      busy(true);
+      return fetchChart(mode, subj, stu)
+        .then(apply)
+        .catch(function (m) { msg(m, true); })
+        .finally(function () { busy(false); });
+    }
+
+    /** 全班模式的前置：先取回 subjectList / roster，再自動選首科重查（D10） */
+    function metaThenClass() {
+      busy(true);
+      return fetchChart('personal', '', '')
+        .then(function (d) {
+          fillSubjects(d.subjectList, '');
+          fillRoster(d.roster, d.studentId);
+          if (!st.subjects.length) {
+            msg('此學期尚無成績資料', false);
+            fillCap({ mode: 'class', subjects: [] });
+            clearGrid('此學期尚無成績資料');
+            return null;
+          }
+          el('subj').value = st.subjects[0].code;
+          return fetchChart('class', el('subj').value, '');
+        })
+        .then(function (d) { if (d) apply(d); })
+        .catch(function (m) { msg(m, true); })
+        .finally(function () { busy(false); });
+    }
+
+    /* ---------- 畫面 ---------- */
+    function fillMeta(d) {
+      if (d.subjectList !== undefined) fillSubjects(d.subjectList, el('subj') ? el('subj').value : '');
+      if (d.roster !== undefined) fillRoster(d.roster, d.studentId);
+    }
+
+    function fillCap(d) {
+      var cap = el('cap');
+      var txt = '';
+      if (d.mode === 'class') {
+        var n = 0;
+        (d.subjects || []).forEach(function (s) { n += (s.students || []).length; });
+        if (n) txt = '科目：' + subjectLabel(d.subject) + '　共 ' + n + ' 位學生，每人一張子圖';
+      } else if (role === 'student') {
+        if ((d.subjects || []).length) txt = '本學期共 ' + d.subjects.length + ' 個科目有成績';
+      } else {
+        var who = null;
+        (d.roster || []).forEach(function (s) { if (s.studentId === d.studentId) who = s; });
+        if ((d.subjects || []).length) {
+          txt = '學生：' + (who ? pad2(who.seatNo) + ' ' + who.studentId + ' ' + who.name : d.studentId) +
+                '　' + d.subjects.length + ' 個科目有成績';
+        }
+      }
+      cap.textContent = txt;
+      cap.classList.toggle('hidden', !txt);
+    }
+
+    function apply(d) {
+      fillMeta(d);
+      fillCap(d);
+      msg('');
+      buildCards(d);
+    }
+
+    /* ---------- 卡片 ---------- */
+    function clearGrid(text) {
+      destroyAll();
+      el('grid').innerHTML = '<div class="empty" style="grid-column:1/-1">' + esc(text) + '</div>';
+    }
+
+    function buildCards(d) {
+      if (typeof Chart === 'undefined') {
+        msg('圖表函式庫未載入，請重新整理頁面', true);
+        clearGrid('圖表函式庫未載入');
+        return;
+      }
+
+      var cards = [];
+      (d.subjects || []).forEach(function (s) {
+        if (d.mode === 'class') {
+          // D10：全班模式每位學生各一張子圖，卡內含綠色班平均線
+          (s.students || []).forEach(function (t) {
+            cards.push({
+              title: (t.seatNo ? '座號 ' + pad2(t.seatNo) : '座號 —') + '　' + t.name,
+              sub: s.na + '（' + s.exams.length + ' 場）',
+              exams: s.exams, avg: s.avg, scores: t.scores, name: t.name
+            });
+          });
+        } else {
+          var t = (s.students || [])[0];
+          if (!t) return;
+          cards.push({
+            title: s.na + '（' + s.exams.length + ' 場）',
+            sub: role === 'student' ? '' : (t.seatNo ? '座號 ' + pad2(t.seatNo) : '座號 —') + '　' + t.name,
+            exams: s.exams, avg: s.avg, scores: t.scores, name: t.name
+          });
+        }
+      });
+
+      attach(cards);
+    }
+
+    function destroyAll() {
+      if (io) { io.disconnect(); io = null; }
+      nodes.forEach(function (n) {
+        if (n.__chart) { n.__chart.destroy(); n.__chart = null; }
+        n.__card = null;
+      });
+      nodes = [];
+    }
+
+    /** 產生卡片 DOM，並以 IntersectionObserver 惰性初始化／離屏銷毀 */
+    function attach(cards) {
+      destroyAll();
+      var grid = el('grid');
+      grid.innerHTML = '';
+
+      if (!cards.length) { clearGrid('查無成績資料，請確認此學期是否已登錄成績'); return; }
+
+      nodes = cards.map(function (card) {
+        var box = document.createElement('div');
+        box.className = 'chart-card';
+        box.innerHTML =
+          '<div class="chart-card-title">' + esc(card.title) + '</div>' +
+          (card.sub ? '<div class="chart-card-sub">' + esc(card.sub) + '</div>' : '') +
+          '<div class="chart-holder"><canvas></canvas></div>';
+        grid.appendChild(box);
+        box.__card = card;
+        return box;
+      });
+
+      if (typeof IntersectionObserver === 'undefined') { nodes.forEach(mount); return; }
+
+      io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          var n = en.target;
+          if (!n.__card) return;
+          if (en.isIntersecting) { if (!n.__chart) mount(n); }
+          else if (n.__chart) { n.__chart.destroy(); n.__chart = null; } // 離屏銷毀
+        });
+      }, { rootMargin: '240px 0px' });
+      nodes.forEach(function (n) { io.observe(n); });
+    }
+
+    function mount(n) {
+      var canvas = n.querySelector('canvas');
+      if (!canvas || !n.__card) return;
+      try { n.__chart = buildChart(canvas, n.__card); }
+      catch (e) { /* 單張失敗不影響其餘卡片 */ }
+    }
+
+    function shortLabel(e) {
+      var d = e.date.length > 10 ? e.date.slice(0, 10) : e.date;
+      d = d.length >= 10 ? d.slice(5) : d;
+      var s = e.scope || '';
+      if (!s) return d;
+      if (s.length > 6) s = s.slice(0, 6) + '…';
+      return d + ' ' + s;
+    }
+
+    function buildChart(canvas, card) {
+      var exams = card.exams || [];
+      var avg = card.avg || [];
+      var me = card.scores || [];
+
+      /** 該點位是否在班平均之上（>= 藍、< 紅），無可比平均時中性灰 */
+      function side(i) {
+        if (i === null || i === undefined || i < 0 || i >= me.length) return GREY;
+        var v = me[i], a = avg[i];
+        if (v === null || v === undefined) return GREY;
+        if (a === null || a === undefined) return GREY;
+        return v >= a ? BLUE : RED;
+      }
+
+      return new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: exams.map(shortLabel),
+          datasets: [
+            {
+              label: '全班平均',
+              data: avg,
+              borderColor: GREEN,
+              backgroundColor: GREEN,
+              borderWidth: 2,
+              pointRadius: 2.5,
+              pointHoverRadius: 5,
+              pointBackgroundColor: GREEN,
+              pointBorderColor: GREEN,
+              spanGaps: false,
+              tension: 0,
+              order: 2
+            },
+            {
+              label: card.name || '成績',
+              data: me,
+              borderColor: BLUE,
+              borderWidth: 2,
+              pointRadius: 3.5,
+              pointHoverRadius: 6,
+              pointBorderWidth: 1.5,
+              spanGaps: false,
+              tension: 0,
+              order: 1,
+              pointBackgroundColor: function (c) { return side(c.dataIndex); },
+              pointBorderColor: function (c) { return side(c.dataIndex); },
+              segment: {
+                // 連線段一併依「段終點是否在班平均之上」著色
+                borderColor: function (c) { return side(c.p1DataIndex); }
+              }
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false, // 全班模式可能同時數十張圖，關閉動畫
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            y: {
+              min: 0, max: 100,               // 規格：Y 軸 0–100
+              ticks: { stepSize: 20, font: { size: 14 } },   // 字級下限 14px
+              grid: { color: '#eef2f7' },
+              title: { display: true, text: '分數', font: { size: 14 } }
+            },
+            x: {
+              grid: { display: false },
+              title: { display: true, text: '考試日期', font: { size: 14 } },
+              ticks: { maxRotation: 45, minRotation: 0, autoSkip: true, font: { size: 14 } }
+            }
+          },
+          plugins: {
+            legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 14 } } },
+            tooltip: {
+              titleFont: { size: 14 }, bodyFont: { size: 14 }, footerFont: { size: 14 },
+              callbacks: {
+                title: function (items) {
+                  if (!items.length) return '';
+                  var e = exams[items[0].dataIndex];
+                  if (!e) return '';
+                  return e.date + (e.scope ? '（' + e.scope + '）' : '');
+                },
+                label: function (c) {
+                  var v = c.parsed.y;
+                  return c.dataset.label + '：' + (v === null || v === undefined ? '—' : v);
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
+    /* ---------- 事件 ---------- */
+    el('go').addEventListener('click', run);
+    el('ysem').addEventListener('change', function () {
+      // 換學期 → 科目下拉重來（學生下拉保留，後端會以新學期名單校正）
+      fillSubjects([], '');
+      run();
+    });
+
+    if (el('mode')) el('mode').addEventListener('change', function () {
+      var isClass = el('mode').value === 'class';
+      el('stuWrap').classList.toggle('hidden', isClass);
+      run();
+    });
+    if (el('subj')) el('subj').addEventListener('change', run);
+    if (el('stu')) el('stu').addEventListener('change', run);
+
+    // 學生端僅學年學期一個條件，自動生成
+    return {
+      onShow: function () {
+        fillYsem();
+        run();
+      }
+    };
+  }
+
+  /* ---------------- 啟動 ---------------- */
+  var views = { admin: null, student: null };
+
+  document.addEventListener('DOMContentLoaded', function () {
+    views.admin = create('chAdminMount', 'admin');
+    views.student = create('chStuMount', 'student');
+  });
+
+  PANEL_ON_SHOW['admin.charts'] = function () { if (views.admin) views.admin.onShow(); };
+  PANEL_ON_SHOW['stu.charts'] = function () { if (views.student) views.student.onShow(); };
+})();
+</script>

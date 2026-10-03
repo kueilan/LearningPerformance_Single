@@ -1,0 +1,310 @@
+<script>
+/* ============================================================
+ * 綜合查詢 (QueryView.html) — M5
+ * 導師(admin) 與 學生/家長(student) 共用同一套 UI：
+ *   - admin   ：學年學期 + 學號/姓名（空＝全班）+ 科目（空＝全科）
+ *   - student ：學年學期 + 科目；學號/姓名框不出現，後端強制本人
+ * 匯出：CSV（前端 Blob，含 BOM）／ PDF（html2canvas + jsPDF，見 D3）
+ * ============================================================ */
+(function () {
+  window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+
+  var PAGE_SIZE = 50;
+  var PDF_CHUNK = 30;   // 每 30 列分批截圖，避免大表佔用記憶體（PLAN §6.3）
+
+  /** 規格書 4.1-4 欄位（表格、CSV、PDF 共用） */
+  var COLS = [
+    { k: 'ysem',      t: '學年學期' },
+    { k: 'seatNo',    t: '座號',    num: true },
+    { k: 'studentId', t: '學號' },
+    { k: 'name',      t: '姓名' },
+    { k: 'subjectNA', t: '科目' },
+    { k: 'examDate',  t: '考試日期' },
+    { k: 'score',     t: '成績',    num: true },
+    { k: 'examScope', t: '考試範圍' }
+  ];
+
+  /** 取出要顯示／匯出的字串值 */
+  function cell(r, k) {
+    if (k === 'score') return (r.score === null || r.score === undefined) ? '' : r.score;
+    if (k === 'subjectNA') return r.subjectNA || r.subject || '';
+    return r[k] === null || r[k] === undefined ? '' : r[k];
+  }
+
+  /** 比較器：數值欄以數值比，空值排最後 */
+  function cmpVal(a, b, numeric) {
+    var ea = a === '' || a === null || a === undefined;
+    var eb = b === '' || b === null || b === undefined;
+    if (ea && eb) return 0;
+    if (ea) return 1;
+    if (eb) return -1;
+    if (numeric) return Number(a) - Number(b);
+    a = String(a); b = String(b);
+    return a < b ? -1 : (a > b ? 1 : 0);
+  }
+
+  /**
+   * 建立查詢實例。
+   * @param {string} rootId 掛載點 id
+   * @param {string} role 'admin' | 'student'
+   * @return {Object|null} {onShow}
+   */
+  function create(rootId, role) {
+    var root = $(rootId);
+    if (!root) return null;
+
+    var p = rootId + '-';
+    var kw = (role === 'student') ? '' :
+      '<div class="w-56"><label class="field-label" for="' + p + 'kw">學號 / 姓名</label>' +
+      '<input id="' + p + 'kw" class="field" maxlength="30" placeholder="留空＝全班"></div>';
+
+    root.innerHTML = [
+      '<div class="space-y-3">',
+        '<div class="flex gap-3 items-end flex-wrap">',
+          '<div class="w-32"><label class="field-label" for="' + p + 'ysem">學年學期</label>',
+            '<select id="' + p + 'ysem" class="field"></select></div>',
+          kw,
+          '<div class="w-44"><label class="field-label" for="' + p + 'subj">科目</label>',
+            '<select id="' + p + 'subj" class="field"><option value="">全部科目</option></select></div>',
+          '<button id="' + p + 'go" class="btn btn-primary">查詢</button>',
+          '<button id="' + p + 'csv" class="btn btn-ghost">匯出 CSV</button>',
+          '<button id="' + p + 'pdf" class="btn btn-ghost">匯出 PDF</button>',
+        '</div>',
+        '<p id="' + p + 'msg" class="text-sm hidden"></p>',
+        '<p id="' + p + 'sum" class="text-sm text-slate-500 hidden"></p>',
+        '<div class="tbl-scroll" id="' + p + 'wrap">',
+          '<table class="tbl">',
+            '<thead id="' + p + 'head"></thead>',
+            '<tbody id="' + p + 'body"></tbody>',
+          '</table>',
+        '</div>',
+        '<div class="flex gap-2 items-center flex-wrap text-sm" id="' + p + 'pager"></div>',
+      '</div>'
+    ].join('');
+
+    function el(k) { return $(p + k); }
+
+    var st = { rows: [], subjects: [], sortKey: '', sortDir: 1, page: 1, last: null };
+
+    /* ---------- 輸入元素 ---------- */
+    function msg(text, isErr) {
+      var m = el('msg');
+      if (!text) { m.classList.add('hidden'); m.textContent = ''; return; }
+      m.className = 'text-sm ' + (isErr ? 'text-red-600' : 'text-slate-600');
+      m.textContent = text;
+      m.classList.remove('hidden');
+    }
+
+    function fillYsem() {
+      var sel = el('ysem');
+      var list = (APP.ysems || []).filter(function (y) { return !!y; });
+      var prev = sel.value;
+      sel.innerHTML = list.length
+        ? list.map(function (y) { return '<option value="' + esc(y) + '">' + esc(y) + '</option>'; }).join('')
+        : '<option value="">（尚無學期）</option>';
+      if (prev && list.indexOf(prev) >= 0) sel.value = prev;
+      el('go').disabled = !list.length;
+    }
+
+    function fillSubjects(list) {
+      var sel = el('subj');
+      var prev = sel.value;
+      st.subjects = list || [];
+      sel.innerHTML = '<option value="">全部科目</option>' + st.subjects.map(function (s) {
+        return '<option value="' + esc(s.code) + '">' + esc(s.na) + '</option>';
+      }).join('');
+      if (prev && st.subjects.some(function (s) { return s.code === prev; })) sel.value = prev;
+      else sel.value = '';
+    }
+
+    function subjectLabel(code) {
+      var hit = st.subjects.filter(function (s) { return s.code === code; })[0];
+      return hit ? hit.na : code;
+    }
+
+    /* ---------- 查詢 ---------- */
+    function run() {
+      var ysem = el('ysem').value;
+      if (!ysem) { msg('尚無學年學期，請先至「學期 / TA 密碼」建立', true); return Promise.resolve(); }
+
+      var subj = el('subj').value;
+      var word = (role === 'student') ? '' : el('kw').value.trim();
+      setBusy(el('go'), true, '查詢中…');
+
+      return rpc('query', { ysem: ysem, subject: subj, studentKeyword: word })
+        .then(function (d) {
+          st.rows = d.rows || [];
+          st.last = { ysem: ysem, subject: subj, keyword: word };
+          st.page = 1;
+          fillSubjects(d.subjects || []);
+          msg('');
+          render();
+        })
+        .catch(function (m) { msg(m, true); })
+        .finally(function () { setBusy(el('go'), false); });
+    }
+
+    /* ---------- 表格 ---------- */
+    function sorted() {
+      var k = st.sortKey, d = st.sortDir;
+      if (!k) return st.rows.slice();
+      var def = COLS.filter(function (c) { return c.k === k; })[0];
+      var numeric = def && def.num;
+      return st.rows.slice().sort(function (a, b) {
+        return cmpVal(a[k], b[k], numeric) * d;
+      });
+    }
+
+    function render() {
+      var rows = sorted();
+      var total = rows.length;
+      var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      if (st.page > pages) st.page = pages;
+      if (st.page < 1) st.page = 1;
+      var start = (st.page - 1) * PAGE_SIZE;
+      var pageRows = rows.slice(start, start + PAGE_SIZE);
+
+      el('head').innerHTML = '<tr>' + COLS.map(function (c) {
+        var arrow = st.sortKey === c.k ? (st.sortDir > 0 ? ' ▲' : ' ▼') : '';
+        return '<th data-sort="' + c.k + '" style="cursor:pointer" title="點擊依此欄排序">' +
+          esc(c.t) + arrow + '</th>';
+      }).join('') + '</tr>';
+
+      el('body').innerHTML = pageRows.length ? pageRows.map(function (r) {
+        return '<tr>' + COLS.map(function (c) {
+          var v = cell(r, c.k);
+          var style = c.num ? ' style="text-align:right"' : '';
+          return '<td' + style + '>' + (v === '' ? '<span class="text-slate-300">—</span>' : esc(v)) + '</td>';
+        }).join('') + '</tr>';
+      }).join('') : '<tr><td colspan="' + COLS.length + '" class="empty">查無資料</td></tr>';
+
+      // 摘要（以完整查詢結果計算，非僅本頁）
+      var stu = {}, sub = {}, sum = 0, n = 0;
+      rows.forEach(function (r) {
+        stu[r.studentId] = 1;
+        sub[r.subject] = 1;
+        if (r.score !== null && r.score !== undefined) { sum += r.score; n++; }
+      });
+      var sumEl = el('sum');
+      if (total) {
+        sumEl.textContent = '共 ' + total + ' 筆　' + Object.keys(stu).length + ' 位學生　' +
+          Object.keys(sub).length + ' 科' +
+          (n ? '　平均 ' + (Math.round(sum / n * 10) / 10) + ' 分' : '');
+        sumEl.classList.remove('hidden');
+      } else {
+        sumEl.classList.add('hidden');
+      }
+
+      el('pager').innerHTML = total > PAGE_SIZE
+        ? '<button class="btn btn-ghost" data-pg="prev"' + (st.page <= 1 ? ' disabled' : '') + '>上一頁</button>' +
+          '<span class="text-slate-500">第 ' + st.page + ' / ' + pages + ' 頁</span>' +
+          '<button class="btn btn-ghost" data-pg="next"' + (st.page >= pages ? ' disabled' : '') + '>下一頁</button>' +
+          '<span class="text-slate-400">顯示 ' + (start + 1) + '–' +
+          Math.min(start + PAGE_SIZE, total) + '／' + total + ' 筆</span>'
+        : (total ? '<span class="text-slate-400">顯示全部 ' + total + ' 筆</span>' : '');
+
+      el('csv').disabled = !total;
+      el('pdf').disabled = !total;
+    }
+
+    /* ---------- 匯出 ---------- */
+    function fileName(ext) {
+      var d = new Date();
+      var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+      var ysem = st.last ? st.last.ysem : (el('ysem').value || '');
+      var sub = (st.last && st.last.subject) ? '_' + subjectLabel(st.last.subject) : '';
+      return '成績查詢_' + ysem + sub + '_' +
+        d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '.' + ext;
+    }
+
+    function condText(n) {
+      var t = '學年學期 ' + (st.last ? st.last.ysem : '') +
+        '　科目 ' + (st.last && st.last.subject ? subjectLabel(st.last.subject) : '全部');
+      if (role === 'student') {
+        t += '　' + ((APP.profile && APP.profile.label) || '本人') + '（僅本人成績）';
+      } else {
+        t += '　學生 ' + (st.last && st.last.keyword ? st.last.keyword : '全班');
+      }
+      return t + '　共 ' + n + ' 筆';
+    }
+
+    function exportCsv() {
+      var rows = sorted();
+      if (!rows.length) { msg('沒有可匯出的資料', true); return; }
+      var out = [COLS.map(function (c) { return c.t; })];
+      rows.forEach(function (r) { out.push(COLS.map(function (c) { return cell(r, c.k); })); });
+      downloadCsv(fileName('csv'), out);
+      toast('已匯出 CSV（' + rows.length + ' 筆）');
+    }
+
+    function exportPdfNow() {
+      var rows = sorted();
+      if (!rows.length) { msg('沒有可匯出的資料', true); return; }
+      var pages = Math.ceil(rows.length / PDF_CHUNK);
+      if (rows.length > PDF_CHUNK * 10 &&
+          !confirm('共 ' + rows.length + ' 筆，約 ' + pages + ' 頁 PDF，輸出需要一些時間，確定繼續？')) {
+        return;
+      }
+      setBusy(el('pdf'), true, '產生中…');
+      exportPdf({
+        filename: fileName('pdf'),
+        title: '成績查詢結果',
+        subtitle: condText(rows.length),
+        headers: COLS.map(function (c) { return c.t; }),
+        aligns: COLS.map(function (c) { return c.num ? 'r' : 'l'; }),
+        chunk: PDF_CHUNK,
+        rows: rows.map(function (r) { return COLS.map(function (c) { return cell(r, c.k); }); })
+      }).then(function () {
+        toast('PDF 已匯出');
+      }).catch(function (m) {
+        msg(m, true);
+      }).finally(function () {
+        setBusy(el('pdf'), false);
+      });
+    }
+
+    /* ---------- 事件 ---------- */
+    el('go').addEventListener('click', run);
+    el('ysem').addEventListener('change', function () { fillSubjects([]); run(); });
+    el('subj').addEventListener('change', run);
+    if (el('kw')) el('kw').addEventListener('keydown', function (e) { if (e.key === 'Enter') run(); });
+    el('csv').addEventListener('click', exportCsv);
+    el('pdf').addEventListener('click', exportPdfNow);
+
+    // 標頭排序（th 每次重繪，改用事件委派）
+    el('wrap').addEventListener('click', function (e) {
+      var th = e.target && e.target.closest ? e.target.closest('th[data-sort]') : null;
+      if (!th) return;
+      var k = th.getAttribute('data-sort');
+      if (st.sortKey === k) st.sortDir = -st.sortDir;
+      else { st.sortKey = k; st.sortDir = 1; }
+      st.page = 1;
+      render();
+    });
+
+    // 分頁
+    el('pager').addEventListener('click', function (e) {
+      var b = e.target && e.target.closest ? e.target.closest('button[data-pg]') : null;
+      if (!b || b.disabled) return;
+      st.page += (b.getAttribute('data-pg') === 'next' ? 1 : -1);
+      render();
+      el('wrap').scrollTop = 0;
+    });
+
+    return {
+      onShow: function () { fillYsem(); run(); }
+    };
+  }
+
+  /* ---------------- 啟動 ---------------- */
+  var views = { admin: null, student: null };
+
+  document.addEventListener('DOMContentLoaded', function () {
+    views.admin = create('qyAdminMount', 'admin');
+    views.student = create('qyStuMount', 'student');
+  });
+
+  PANEL_ON_SHOW['admin.query'] = function () { if (views.admin) views.admin.onShow(); };
+  PANEL_ON_SHOW['stu.records'] = function () { if (views.student) views.student.onShow(); };
+})();
+</script>

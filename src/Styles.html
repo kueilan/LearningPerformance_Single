@@ -1,0 +1,52 @@
+<style>
+  /* 通用 */
+  .card { background:#fff; border-radius:.75rem; box-shadow:0 1px 3px rgba(0,0,0,.08); padding:1.25rem; }
+  .card-title { font-size:1rem; font-weight:600; margin-bottom:.75rem; }
+  .btn { display:inline-flex; align-items:center; gap:.375rem; border-radius:.5rem; padding:.5rem 1rem;
+         font-size:.875rem; font-weight:500; transition:.15s; }
+  .btn-primary { background:#2563eb; color:#fff; }
+  .btn-primary:hover { background:#1d4ed8; }
+  .btn-primary:disabled { background:#93c5fd; cursor:not-allowed; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-ghost { background:#f1f5f9; color:#334155; }
+  .btn-ghost:hover { background:#e2e8f0; }
+  .btn-danger { background:#dc2626; color:#fff; }
+  .btn-danger:hover { background:#b91c1c; }
+  .field-label { display:block; font-size:.875rem; font-weight:500; margin-bottom:.25rem; color:#334155; }
+  .field { width:100%; border:1px solid #cbd5e1; border-radius:.5rem; padding:.5rem .625rem;
+           font-size:.875rem; background:#fff; }
+  .field:focus { outline:none; border-color:#3b82f6; box-shadow:0 0 0 2px rgba(59,130,246,.25); }
+  .field:disabled { background:#f8fafc; color:#94a3b8; }
+
+  /* 表格 */
+  .tbl { width:100%; border-collapse:collapse; font-size:.875rem; }
+  .tbl th { background:#f8fafc; text-align:left; padding:.5rem .625rem; border-bottom:1px solid #e2e8f0;
+            font-weight:600; white-space:nowrap; position:sticky; top:0; z-index:1; }
+  .tbl td { padding:.4rem .625rem; border-bottom:1px solid #f1f5f9; }
+  .tbl tbody tr:hover { background:#f8fafc; }
+  .tbl-scroll { max-height:60vh; overflow:auto; border:1px solid #e2e8f0; border-radius:.5rem; }
+
+  /* 導覽列 */
+  .tab-btn { padding:.625rem .875rem; font-size:.875rem; font-weight:500; color:#64748b;
+             border-bottom:2px solid transparent; transition:.15s; white-space:nowrap; }
+  .tab-btn:hover { color:#2563eb; }
+  .tab-btn.active { color:#2563eb; border-bottom-color:#2563eb; }
+
+  /* 圖表卡片 */
+  .chart-card { background:#fff; border-radius:.75rem; box-shadow:0 1px 3px rgba(0,0,0,.08);
+                padding:1rem; break-inside:avoid; }
+  .chart-card-title { font-size:.9375rem; font-weight:600; color:#1e293b; line-height:1.4; }
+  .chart-card-sub   { font-size:.875rem; color:#94a3b8; margin-top:.125rem; margin-bottom:.625rem; }
+  .chart-holder { position:relative; height:230px; }
+
+  /* 雙色線提示點 */
+  .legend-dot { display:inline-block; width:.625rem; height:.625rem; border-radius:9999px; margin-right:.25rem; vertical-align:middle; }
+
+  .empty { text-align:center; color:#94a3b8; font-size:.875rem; padding:2rem 1rem; }
+  .spinner { display:inline-block; width:1rem; height:1rem; border:2px solid rgba(255,255,255,.4);
+             border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* 列印/PDF 截圖區域（html2canvas 會避開 print:hidden） */
+  @media print { .no-print { display:none !important; } }
+</style>
