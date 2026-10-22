@@ -1,0 +1,176 @@
+<script>
+(function () {
+  var root, data = null, result = null, optionSequence = 0, reportSequence = 0;
+  var tieNames = ['國文', '英文', '數學', '自然', '歷史', '地理', '公民'];
+  var tieCodes = ['CHI', 'ENG', 'MATH', 'SCI', 'HIST', 'GEO', 'CIV'];
+  function message(text) { $('crMessage').textContent = text; }
+  function invalidate() {
+    result = null;
+    $('crOutput').innerHTML = '';
+    $('crCsv').disabled = true;
+    $('crPdf').disabled = true;
+  }
+  function options() {
+    ++reportSequence;
+    invalidate();
+    data = null;
+    $('crSubjects').innerHTML = '';
+    $('crTies').innerHTML = '';
+    $('crRun').disabled = true;
+    $('crLatest').disabled = true;
+    var ysem = $('crYsem').value, serial = ++optionSequence;
+    if (!ysem) { message('尚無學期，請先建立學期與成績。'); return; }
+    message('載入既有科目與場次…');
+    rpc('classReportOptions', {ysem:ysem}).then(function (d) {
+      if (serial !== optionSequence) return;
+      data = d;
+      $('crSubjects').innerHTML = d.subjects.map(function (subject, i) {
+        return '<tr><td><label><input class="cr-display" data-index="' + i + '" type="checkbox"' +
+          ' checked> ' + esc(subject.na) + '</label></td><td>' +
+          '<select id="crExam-' + i + '" class="field" aria-label="' + esc(subject.na + '段考場次') + '">' +
+          '<option value="">' + (subject.exams.length ? '不選取' : '尚無成績（以 0 分計算）') + '</option>' + subject.exams.map(function (exam, j) {
+            return '<option value="' + j + '">' + esc(exam.examDate + '｜' + (exam.examScope || '未填考試範圍')) + '</option>';
+          }).join('') + '</select></td></tr>';
+      }).join('');
+      $('crTies').innerHTML = tieNames.map(function (name, i) {
+        var match = d.subjects.find(function (s) { return s.na === '段考' + name; }) ||
+          d.subjects.find(function (s) { return s.na === name || s.code.toUpperCase() === tieCodes[i]; });
+        return '<div><label class="field-label" for="crTie-' + i + '">' + name + '</label>' +
+          '<select id="crTie-' + i + '" class="field"><option value="">未設定（略過）</option>' +
+          d.subjects.map(function (s) { return '<option value="' + esc(s.code) + '"' +
+            (match && s.code === match.code ? ' selected' : '') + '>' + esc(s.na) + '</option>'; }).join('') + '</select></div>';
+      }).join('');
+      $('crRun').disabled = !d.subjects.length;
+      $('crLatest').disabled = !d.subjects.some(function (subject) { return subject.exams.length; });
+      message('可一鍵選取各科最新場次，或逐科選擇後再產生成績單。自然科可自行對應既有科目。');
+    }).catch(function (msg) { if (serial === optionSequence) message(msg); });
+  }
+  function selectLatest() {
+    if (!data) return;
+    ++reportSequence;
+    invalidate();
+    var selected = 0, missing = 0, ambiguous = 0;
+    data.subjects.forEach(function (subject, i) {
+      var select = $('crExam-' + i);
+      if (!subject.exams.length) { select.value = ''; ++missing; return; }
+      // 後端日期均為 YYYY-MM-DD；逐科比較日期，不依賴場次清單順序或考試範圍名稱。
+      var latestDate = subject.exams.reduce(function (date, exam) { return exam.examDate > date ? exam.examDate : date; }, '');
+      var matches = subject.exams.map(function (exam, index) { return exam.examDate === latestDate ? index : -1; })
+        .filter(function (index) { return index >= 0; });
+      // 同日有多個範圍時，保留已選的最新場次；否則選清單中第一個並提示確認。
+      var current = select.value === '' ? -1 : Number(select.value);
+      select.value = String(matches.indexOf(current) >= 0 ? current : matches[0]);
+      ++selected;
+      if (matches.length > 1) ++ambiguous;
+    });
+    message('已依日期選取 ' + selected + ' 科的最新場次，可逐科調整後再產生成績單。' +
+      (missing ? '另有 ' + missing + ' 科尚無場次，維持缺成績以 0 分計算。' : '') +
+      (ambiguous ? '有 ' + ambiguous + ' 科在最新日期有多個場次，請確認考試範圍。' : ''));
+  }
+  function reportTable(d) {
+    var headers = ['座號', '學號', '姓名'].concat(d.columns.map(function (c) { return c.subjectNA; }), ['總分', '排名']);
+    var rows = d.rows.map(function (r) {
+      return [r.seatNo, r.studentId, r.name].concat(r.scores.map(function (s) { return s === null ? '0（缺成績）' : s; }),
+        [r.total, r.rank]);
+    });
+    return {headers:headers, rows:rows};
+  }
+  function reportSubtitle(d) {
+    return d.ysem + '｜' + d.stage + '｜' + d.columns.map(function (c) {
+      return c.examDate ? c.subjectNA + ' ' + c.examDate + ' ' + c.examScope : c.subjectNA + '（尚無成績）';
+    }).join('；') + '｜同分比較：' + d.tieOrder.map(function (t) { return t.name + '（' + (t.subjectNA || '略過') + '）'; }).join(' → ');
+  }
+  function run() {
+    if (!data) return;
+    invalidate();
+    var exams = [];
+    data.subjects.forEach(function (subject, i) {
+      var value = $('crExam-' + i).value;
+      var display = root.querySelector('.cr-display[data-index="' + i + '"]').checked;
+      if (value === '') {
+        if (!subject.exams.length) {
+          exams.push({subject:subject.code, examDate:'', examScope:'', display:display});
+          return;
+        }
+        if (display) throw new Error('請選擇段考場次：' + subject.na);
+        return;
+      }
+      var e = subject.exams[Number(value)];
+      exams.push({subject:subject.code, examDate:e.examDate, examScope:e.examScope, display:display});
+    });
+    var ties = tieNames.map(function (_, i) { return $('crTie-' + i).value; });
+    var payload = {ysem:$('crYsem').value, stage:$('crStage').value, exams:exams, tieSubjects:ties};
+    var serial = ++reportSequence;
+    setBusy($('crRun'), true, '產生中…');
+    message('');
+    rpc('classReport', payload).then(function (d) {
+      if (serial !== reportSequence) return;
+      result = d;
+      var table = reportTable(d);
+      $('crOutput').innerHTML = '<h3 class="font-semibold mb-2">' + esc(d.ysem + ' ' + d.stage + ' 全班成績單') + '</h3>' +
+        '<p class="text-sm text-slate-500 mb-3" style="overflow-wrap:anywhere">' + esc(reportSubtitle(d)) + '</p>' +
+        '<div class="tbl-scroll"><table class="tbl"><thead><tr>' + table.headers.map(function (h) {
+          return '<th>' + esc(h) + '</th>';
+        }).join('') + '</tr></thead><tbody>' + (table.rows.length ? table.rows.map(function (row) {
+          return '<tr>' + row.map(function (cell) { return '<td>' + esc(cell) + '</td>'; }).join('') + '</tr>';
+        }).join('') : '<tr><td colspan="' + table.headers.length + '" class="empty">此學期尚無學生名單。</td></tr>') + '</tbody></table></div>';
+      $('crCsv').disabled = !d.rows.length;
+      $('crPdf').disabled = !d.rows.length;
+      message('共 ' + d.rows.length + ' 位學生，' + d.rankedCount + ' 位列入排名。');
+    }).catch(function (msg) { if (serial === reportSequence) message(msg); })
+      .finally(function () { setBusy($('crRun'), false); if (!data) $('crRun').disabled = true; });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    root = $('classReportMount');
+    root.innerHTML = '<div class="flex gap-3 items-end flex-wrap mb-4">' +
+      '<div><label class="field-label" for="crYsem">學年學期</label><select id="crYsem" class="field"></select></div>' +
+      '<div><label class="field-label" for="crStage">顯示階段</label><input id="crStage" class="field" maxlength="40" placeholder="例如：第一次段考"></div>' +
+      '<button id="crRun" class="btn btn-primary" disabled>產生成績單</button>' +
+      '<button id="crCsv" class="btn btn-ghost" disabled>匯出 CSV</button>' +
+      '<button id="crPdf" class="btn btn-ghost" disabled>匯出 PDF</button></div>' +
+      '<fieldset data-pdf-settings class="border border-slate-200 rounded-lg p-3 mb-4">' +
+      '<legend class="text-sm font-semibold px-1">PDF 匯出設定（A4 直式）</legend>' +
+      '<div class="flex gap-5 flex-wrap text-sm">' +
+      '<label><input id="crPdfRank" type="checkbox" checked> 顯示名次</label>' +
+      '<label><input id="crPdfName" type="checkbox" checked> 學生姓名</label>' +
+      '<label><input id="crPdfSignature" type="checkbox"> 家長簽名區（整份一處）</label></div></fieldset>' +
+      '<p class="text-sm text-slate-500 mb-3">勾選科目會顯示並計入總分；每科指定一個既有段考場次。未勾選的科目仍可選場次供同分比較。</p>' +
+      '<div class="tbl-scroll mb-4"><table class="tbl"><thead><tr><th>顯示／計入總分</th><th>' +
+      '<div class="flex items-center justify-between gap-3 flex-wrap"><span>此階段的段考場次</span>' +
+      '<button id="crLatest" type="button" class="btn btn-ghost" disabled>一鍵選取最新場次</button></div>' +
+      '</th></tr></thead><tbody id="crSubjects"></tbody></table></div>' +
+      '<details class="mb-4" open><summary class="font-semibold cursor-pointer">同分比較科目對應</summary>' +
+      '<div id="crTies" class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3"></div></details>' +
+      '<p class="text-sm text-slate-500 mb-3">排名：總分由高至低，再依段考國文、英文、數學、自然、歷史、地理、公民比較。缺成績以 0 分計入總分與同分比較，並註記「0（缺成績）」；全班皆列入排名。全部相同則並列，後續名次跳號。未設定的比較科目會明列為略過。</p>' +
+      '<p id="crMessage" class="text-sm mb-3" role="status"></p><div id="crOutput"></div>';
+    $('crYsem').addEventListener('change', options);
+    $('crLatest').addEventListener('click', selectLatest);
+    root.addEventListener('change', function (event) {
+      if (event.target.closest('[data-pdf-settings]')) return;
+      if (event.target.id !== 'crYsem') { ++reportSequence; invalidate(); }
+    });
+    $('crStage').addEventListener('input', function () { ++reportSequence; invalidate(); });
+    $('crRun').addEventListener('click', function () { try { run(); } catch (e) { message(e.message); } });
+    $('crCsv').addEventListener('click', function () {
+      if (!result) return;
+      var table = reportTable(result);
+      downloadCsv('全班成績單_' + result.ysem + '.csv', [[reportSubtitle(result)], table.headers].concat(table.rows));
+    });
+    $('crPdf').addEventListener('click', function () {
+      if (!result) return;
+      var btn = $('crPdf');
+      setBusy(btn, true, '匯出中…');
+      exportClassReportPdf(result, {showRank:$('crPdfRank').checked, showName:$('crPdfName').checked,
+        parentSignature:$('crPdfSignature').checked})
+        .catch(message).finally(function () { setBusy(btn, false); if (!result) btn.disabled = true; });
+    });
+  });
+  window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+  PANEL_ON_SHOW['admin.report'] = function () {
+    var previous = $('crYsem').value;
+    $('crYsem').innerHTML = (APP.ysems || []).map(function (y) { return '<option value="' + esc(y) + '">' + esc(y) + '</option>'; }).join('');
+    if ((APP.ysems || []).indexOf(previous) >= 0) $('crYsem').value = previous;
+    options();
+  };
+})();
+</script>

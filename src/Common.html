@@ -75,6 +75,8 @@ var NAV = {
     { id: 'admin.students',  label: '學生資料匯入' },
     { id: 'admin.grades',    label: '成績登記' },
     { id: 'admin.query',     label: '綜合查詢 / 匯出' },
+    { id: 'admin.report',    label: '全班成績單' },
+    { id: 'admin.announcements', label: '公告管理' },
     { id: 'admin.charts',    label: '成長曲線圖' }
   ],
   ta: [
@@ -110,6 +112,7 @@ function showLogin() {
   $('loginSection').classList.remove('hidden');
   $('loginCode').value = '';
   $('loginError').classList.add('hidden');
+  if (window.loadPublicAnnouncements) window.loadPublicAnnouncements();
 }
 
 function renderNav() {
@@ -221,8 +224,8 @@ function exportPdf(opts) {
     return Promise.reject('PDF 元件尚未載入完成，請重新整理頁面後再試');
   }
   var jsPDF = window.jspdf.jsPDF;
-  var pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-  var A4_W = 210, A4_H = 297;
+  var pdf = new jsPDF({ orientation: opts.landscape ? 'landscape' : 'portrait', unit: 'mm', format: 'a4' });
+  var A4_W = opts.landscape ? 297 : 210, A4_H = opts.landscape ? 210 : 297;
   var chunk = Math.max(1, opts.chunk || 30);
   var rows = opts.rows || [];
   var total = rows.length;
@@ -240,7 +243,7 @@ function exportPdf(opts) {
     var th = '', trs = '', c;
     for (c = 0; c < headers.length; c++) {
       th += '<th style="background:#f1f5f9;border:1px solid #cbd5e1;padding:6px 8px;text-align:' +
-        alignOf(c) + ';font:bold 12px ' + FF + ';color:#111;white-space:nowrap">' +
+        alignOf(c) + ';font:bold 12px/20px ' + FF + ';color:#111;white-space:nowrap">' +
         esc(headers[c]) + '</th>';
     }
     for (var i = from; i < to; i++) {
@@ -248,7 +251,7 @@ function exportPdf(opts) {
       for (c = 0; c < headers.length; c++) {
         var v = rows[i][c];
         v = (v === null || v === undefined) ? '' : v;
-        tds += '<td style="border:1px solid #e2e8f0;padding:5px 8px;font:12px ' + FF +
+        tds += '<td style="border:1px solid #e2e8f0;padding:7px 8px;font:12px/20px ' + FF +
           ';color:#111;text-align:' + alignOf(c) + '">' + esc(v) + '</td>';
       }
       trs += '<tr>' + tds + '</tr>';
@@ -259,7 +262,7 @@ function exportPdf(opts) {
         FF + '">查無資料</td></tr>';
     }
 
-    return '<div style="padding:18px 20px;background:#fff;width:720px">' +
+    return '<div style="padding:18px 20px;background:#fff;width:' + (Number(opts.width) || 720) + 'px">' +
       '<div style="font:bold 17px/1.4 ' + FF + ';color:#111">' + esc(opts.title || '查詢結果') + '</div>' +
       '<div style="font:12px/1.6 ' + FF + ';color:#444;margin-top:4px">' + esc(opts.subtitle || '') + '</div>' +
       '<div style="font:11px/1.6 ' + FF + ';color:#777;text-align:right">第 ' + (idx + 1) + ' / ' +

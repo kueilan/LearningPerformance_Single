@@ -1,4 +1,7 @@
 # 導師全班各科學業表現登錄系統
+
+公告欄與全班成績單已於 2026-10-22 更新至正式版本 5，加入最新場次一鍵選取及 A4 直式 PDF 匯出設定；功能與排名規則見 [FEATURES.md](FEATURES.md)。
+部署前已備份資料庫，更新沿用現有資料庫與正式網址；本次功能不需要資料遷移。
 ![專案封面圖片](產品介紹圖.png)
 導師建學期與匯入名單、各科小老師登錄本科成績、學生與家長查詢個人成績與成長曲線。
 以 **Google Apps Script 網頁應用程式 + Google Sheets** 建置，免伺服器、免資料庫、免網域。
@@ -43,7 +46,7 @@ clasp login
 
 ### 2.2 取得 Apps Script 專案
 
-**沿用本專案既有的腳本（`scriptId` 已寫在 `.clasp.json`）**
+**沿用本機已設定的腳本（`scriptId` 已寫在 `.clasp.json`；此檔不提交至 Git）**
 
 ```bash
 clasp open        # 在瀏覽器開啟 Apps Script 編輯器
@@ -117,7 +120,7 @@ clasp push -f
 
 按「部署」→ 複製產生的網址（`https://script.google.com/macros/s/.../exec`），這個網址就是師生使用的入口。
 
-> `src/appsscript.json` 刻意保持精簡，**存取權「所有人」是在此處設定**，不在程式碼裡。
+> `src/appsscript.json` 已設定 `webapp.access: "ANYONE_ANONYMOUS"` 與 `webapp.executeAs: "USER_DEPLOYING"`，對應「所有人」及「以部署者身分執行」。試算表本身仍維持私人存取。
 
 ### 2.7 更新程式碼（之後每次修改都要）
 
@@ -125,10 +128,11 @@ clasp push -f
 clasp push -f
 ```
 
-然後在編輯器：**部署 → 管理部署 → 找到現有的網頁應用程式 → 按鉛筆（編輯）→ 版本選「**Head deployment**」→ 部署**。
+然後在編輯器：**部署 → 管理部署 → 找到現有的網頁應用程式 → 按鉛筆（編輯）→ 版本選「新版本」→ 部署**。
 
-- 選 **Head deployment**：以後 `clasp push` 的新程式碼會自動生效，不需再重複這步驟。
-- 若版本選的是**固定版本號**，每次 push 都必須重做這步驟，且請**沿用同一個部署**，不要新增部署（否則會多出一堆舊網址）。
+- 正式 `/exec` 網址使用版本化部署；只執行 `clasp push` 不會更新正式版本。
+- **沿用同一個部署**即可保留原網址。也可執行 `clasp create-deployment --deploymentId <既有部署ID> --description "更新說明"`，建立新版本並更新該部署。
+- Head deployment 用於測試最新程式碼，不作為師生使用的正式部署。詳見 [Google 部署文件](https://developers.google.com/apps-script/concepts/deployments)。
 
 ### 2.8 驗證部署
 
@@ -247,7 +251,7 @@ clasp push -f
 | 分數打不進去 | 只接受 **0–100 的整數**，小數與負數會被拒絕 |
 | 儲存後資料看起來沒動 | 這是預期行為：採 diff 寫入，零變動＝完全不寫試算表 |
 | 成績格變空白 | 該筆成績已被「清空＝刪除」；或用 `scanCorruptedRows()` 掃描受損列 |
-| 更新了程式碼但沒生效 | `clasp push` 後仍需 **部署 → 管理部署 → 編輯 → 版本選 Head deployment** |
+| 更新了程式碼但沒生效 | `clasp push` 後仍需 **部署 → 管理部署 → 編輯 → 版本選「新版本」→ 部署** |
 | CSV / PDF 匯不出來 | 匯出功能依賴 CDN（html2canvas、jsPDF），**瀏覽器需能連外** |
 | 視窗縮放後圖表尺寸怪 | 切換分頁會自動重建圖表；仍異常時重新整理頁面 |
 | 執行時數不足 | Google 免費帳號每日有執行配額；本系統每次請求都會重讀試算表，屬正常消耗 |
@@ -359,7 +363,7 @@ LearningPerformance/
 ├── LearningPerformance_CodeArtifact.md   # 原始規格書
 ├── G11.csv                         # 學生匯入範本（四欄、免標頭）
 └── src/
-    ├── appsscript.json             # Asia/Taipei、V8、精簡版（存取權在部署設定）
+    ├── appsscript.json             # Asia/Taipei、V8、網頁存取權與執行身分
     ├── Code.gs                     # doGet、include_()、api() 單一入口與 dispatch_
     ├── Auth.gs                     # 登入、token、權限閘道（assertRole_ / assertSubjectScope_）
     ├── Storage.gs                  # 試算表讀寫、文字格式、寫入鎖

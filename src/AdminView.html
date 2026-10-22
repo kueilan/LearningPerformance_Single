@@ -396,4 +396,24 @@
     <div id="chAdminMount"></div>
   </section>
 
+  <section data-panel="admin.report" class="card hidden">
+    <div class="card-title">全班成績單</div>
+    <div id="classReportMount"></div>
+  </section>
+  <section data-panel="admin.announcements" class="card hidden">
+    <div class="card-title">公告管理</div>
+    <p class="text-sm text-slate-500 mb-3">已發布公告會顯示於登入頁；取消「發布」即可下架，內容仍保留供編輯。</p>
+    <div class="flex gap-2 mb-3">
+      <button id="announcementNew" class="btn btn-ghost">新增公告</button>
+      <button id="announcementReload" class="btn btn-ghost">重新載入</button>
+    </div>
+    <div id="announcementList" class="space-y-2 mb-4"></div>
+    <label class="field-label" for="announcementTitle">標題</label>
+    <input id="announcementTitle" class="field mb-3" maxlength="80">
+    <label class="field-label" for="announcementBody">內容</label>
+    <textarea id="announcementBody" class="field mb-3" rows="6" maxlength="1500"></textarea>
+    <label class="text-sm"><input id="announcementPublished" type="checkbox"> 發布至登入頁</label>
+    <button id="announcementSave" class="btn btn-primary ml-3" disabled>儲存公告</button>
+    <p id="announcementMessage" class="text-sm mt-3" role="status"></p>
+  </section>
 </div>

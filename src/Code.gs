@@ -45,9 +45,9 @@ const CFG = Object.freeze({
   /**
    * 不需 token 即可呼叫的 action。
    * 其餘一律先經 requireAuth_() 驗證，再由 dispatch_() 驗角色。
-   * 註：少了 login 會導致「自己登入自己」失敗（M1 已修過一次，勿刪）。
+   * login 與已發布公告可匿名讀取；公告管理與全班成績單須導師權限。
    */
-  PUBLIC_ACTIONS: ['login']
+  PUBLIC_ACTIONS: ['login', 'publicAnnouncements']
 });
 
 /**
@@ -147,6 +147,20 @@ function dispatch_(action, payload, ctx) {
     /* ---- 公開 ---- */
     case 'login':
       return login_(payload.code);
+    case 'publicAnnouncements':
+      return publicAnnouncements_();
+    case 'adminAnnouncements':
+      assertRole_(ctx, ['admin']);
+      return adminAnnouncements_();
+    case 'saveAnnouncement':
+      assertRole_(ctx, ['admin']);
+      return saveAnnouncement_(payload);
+    case 'classReportOptions':
+      assertRole_(ctx, ['admin']);
+      return classReportOptions_(payload.ysem);
+    case 'classReport':
+      assertRole_(ctx, ['admin']);
+      return classReport_(payload);
 
     /* ---- 任意已登入角色 ---- */
     case 'logout':

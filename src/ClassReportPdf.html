@@ -1,0 +1,120 @@
+<script>
+/** PDF 專用欄位模型；不改動畫面、CSV 或成績資料。 */
+function classReportPdfGroups(report, settings) {
+  settings = settings || {};
+  var before = [{label:'座號', width:32, value:function (r) { return r.seatNo; }},
+    {label:'學號', width:68, value:function (r) { return r.studentId; }}];
+  if (settings.showName !== false) before.push({label:'學生姓名', width:76, value:function (r) { return r.name; }});
+  var after = [{label:'總分', width:42, value:function (r) { return r.total; }}];
+  if (settings.showRank !== false) after.push({label:'名次', width:36, value:function (r) { return r.rank; }});
+  // A4 直式，左右各 10mm。科目過多時分欄群，維持可閱讀字級。
+  var pageWidth = 718, fixed = before.concat(after).reduce(function (sum, c) { return sum + c.width; }, 0);
+  var perGroup = Math.max(1, Math.floor((pageWidth - fixed) / 46));
+  var groups = [], columns = report.columns || [];
+  for (var start = 0; start < Math.max(1, columns.length); start += perGroup) {
+    var subjectColumns = columns.slice(start, start + perGroup).map(function (column, offset) {
+      var index = start + offset;
+      return {label:column.subjectNA, width:(pageWidth - fixed) / Math.min(perGroup, columns.length - start || 1),
+        value:function (row) { var score = row.scores[index]; return score == null ? '0（缺成績）' : score; }};
+    });
+    var all = before.concat(subjectColumns, after);
+    groups.push({headers:all.map(function (c) { return c.label; }), widths:all.map(function (c) { return c.width; }),
+      rows:report.rows.map(function (r) { return all.map(function (c) { return c.value(r); }); })});
+  }
+  return groups;
+}
+
+/** 純函式：整列分頁，確保不將同一位學生切成上下兩頁。 */
+function paginateClassReportPdf(rowHeights, capacity, finalReserve) {
+  finalReserve = finalReserve || 0;
+  if (finalReserve > capacity) throw new Error('簽名區超出 A4 可列印高度，請縮短成績單標題');
+  var pages = [], page = [], used = 0;
+  rowHeights.forEach(function (height, index) {
+    if (height > capacity) throw new Error('單列內容超出 A4 可列印高度，請縮短科目名稱或學生資料');
+    if (page.length && used + height > capacity) { pages.push(page); page = []; used = 0; }
+    page.push(index); used += height;
+  });
+  if (page.length || !pages.length) pages.push(page);
+  // 只在整份文件末頁預留簽名空間；需要換頁時，將末幾列連同簽名移至新頁。
+  var last = pages[pages.length - 1];
+  var lastHeight = last.reduce(function (sum, index) { return sum + rowHeights[index]; }, 0);
+  if (lastHeight + finalReserve > capacity) {
+    var tail = [], tailHeight = 0;
+    while (last.length && lastHeight + finalReserve > capacity &&
+      tailHeight + rowHeights[last[last.length - 1]] <= capacity - finalReserve) {
+      var moved = last.pop(); tail.unshift(moved); tailHeight += rowHeights[moved]; lastHeight -= rowHeights[moved];
+    }
+    pages.push(tail);
+  }
+  return pages;
+}
+
+/** 用實際 DOM 高度排版 A4 直式 PDF，僅含紙本成績單內容。 */
+async function exportClassReportPdf(report, settings) {
+  if (typeof html2canvas === 'undefined' || !window.jspdf || !window.jspdf.jsPDF) {
+    throw new Error('PDF 元件尚未載入完成，請重新整理頁面後再試');
+  }
+  var groups = classReportPdfGroups(report, settings);
+  var pdf = new window.jspdf.jsPDF({orientation:'portrait', unit:'mm', format:'a4'});
+  var host = document.createElement('div');
+  host.style.cssText = 'position:absolute;left:-10000px;top:0;width:718px;background:white;color:#111;';
+  document.body.appendChild(host);
+  var font = "Arial,'Microsoft JhengHei',sans-serif";
+  var title = report.ysem + ' 學期｜' + report.stage + ' 全班成績單';
+  function pageHtml(group, indices, signature) {
+    return '<div style="width:718px;box-sizing:border-box;padding:2px 0 8px;background:#fff;font:12px/18px ' + font + '">' +
+      '<h1 style="font:bold 18px/26px ' + font + ';margin:0 0 12px;overflow-wrap:anywhere">' + esc(title) + '</h1>' +
+      '<table style="width:100%;table-layout:fixed;border-collapse:collapse">' +
+      '<colgroup>' + group.widths.map(function (width) { return '<col style="width:' + width + 'px">'; }).join('') + '</colgroup>' +
+      '<thead><tr>' + group.headers.map(function (header) {
+        return '<th style="border:1px solid #94a3b8;background:#f1f5f9;padding:6px 3px;vertical-align:middle;overflow-wrap:anywhere;font-weight:bold">' + esc(header) + '</th>';
+      }).join('') + '</tr></thead><tbody>' + indices.map(function (index) {
+        return '<tr>' + group.rows[index].map(function (value) {
+          return '<td style="border:1px solid #cbd5e1;padding:7px 3px;height:36px;box-sizing:border-box;vertical-align:middle;text-align:center;overflow-wrap:anywhere">' + esc(value) + '</td>';
+        }).join('') + '</tr>';
+      }).join('') + '</tbody></table>' + (signature ?
+        '<div data-parent-signature style="margin-top:18px;min-height:84px;box-sizing:border-box;padding:18px 12px;border:1px solid #94a3b8;font-size:14px">家長簽名：________________________</div>' : '') + '</div>';
+  }
+  try {
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    var pages = [];
+    // 190mm × 277mm 的可列印區域，另預留頁碼與浮點誤差空間。
+    var maxHeight = 718 * 277 / 190 - 24;
+    groups.forEach(function (group, groupIndex) {
+      host.innerHTML = pageHtml(group, []);
+      var overhead = host.firstChild.getBoundingClientRect().height;
+      var signatureHeight = 0;
+      if (settings && settings.parentSignature === true && groupIndex === groups.length - 1) {
+        host.innerHTML = pageHtml(group, [], true);
+        signatureHeight = host.firstChild.getBoundingClientRect().height - overhead;
+      }
+      // 逐批量測，避免名單過長而產生超大畫布。
+      var heights = [];
+      for (var offset = 0; offset < group.rows.length; offset += 40) {
+        var indices = group.rows.slice(offset, offset + 40).map(function (_, i) { return offset + i; });
+        host.innerHTML = pageHtml(group, indices);
+        Array.prototype.forEach.call(host.querySelectorAll('tbody tr'), function (row) { heights.push(row.getBoundingClientRect().height); });
+      }
+      paginateClassReportPdf(heights, maxHeight - overhead, signatureHeight).forEach(function (indices) {
+        pages.push({group:group, indices:indices});
+      });
+    });
+    for (var index = 0; index < pages.length; index++) {
+      host.innerHTML = pageHtml(pages[index].group, pages[index].indices,
+        settings && settings.parentSignature === true && index === pages.length - 1);
+      var canvas = await html2canvas(host.firstChild, {scale:2, backgroundColor:'#ffffff', logging:false});
+      if (index) pdf.addPage();
+      var heightMm = 190 * canvas.height / canvas.width;
+      if (heightMm > 277 - 4) throw new Error('PDF 排版高度超出頁面，請減少同頁內容後再試');
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.96), 'JPEG', 10, 10, 190, heightMm);
+      if (pages.length > 2) {
+        pdf.setFontSize(9);
+        pdf.setTextColor(90);
+        pdf.text((index + 1) + ' / ' + pages.length, 105, 291, {align:'center'});
+      }
+      host.innerHTML = '';
+    }
+    pdf.save('全班成績單_' + report.ysem + '.pdf');
+  } finally { if (host.parentNode) host.parentNode.removeChild(host); }
+}
+</script>

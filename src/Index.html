@@ -39,6 +39,11 @@
           系統會自動辨識角色：導師密碼、小老師密碼、學生登入驗證碼。
         </p>
       </div>
+      <aside class="bg-white rounded-xl shadow p-6 mt-5" aria-labelledby="announcementHeading">
+        <h2 id="announcementHeading" class="font-semibold text-brand-700 mb-3">公告欄</h2>
+        <div id="publicAnnouncements" aria-live="polite"><p class="text-sm text-slate-500">公告載入中…</p></div>
+        <button id="announcementRetry" class="btn btn-ghost mt-3 hidden">重新載入公告</button>
+      </aside>
     </div>
   </section>
 
@@ -65,6 +70,8 @@
       <?!= include_('GradesEntry') ?>
       <?!= include_('QueryView') ?>
       <?!= include_('ChartView') ?>
+      <?!= include_('ClassReportView') ?>
+      <?!= include_('ClassReportPdf') ?>
     </main>
   </section>
 
@@ -74,5 +81,6 @@
   </div>
 
   <?!= include_('Common') ?>
+  <?!= include_('AnnouncementView') ?>
 </body>
 </html>

@@ -1,0 +1,69 @@
+<script>
+(function () {
+  var store = null, editingId = '', request = 0;
+  window.loadPublicAnnouncements = function () {
+    var target = $('publicAnnouncements');
+    if (!target) return;
+    var serial = ++request;
+    rpc('publicAnnouncements').then(function (items) {
+      if (serial !== request) return;
+      target.innerHTML = items.length ? items.map(function (item) {
+        return '<article class="border-b border-slate-100 py-3">' +
+          '<h3 class="font-semibold">' + esc(item.title) + '</h3>' +
+          '<p class="text-xs text-slate-400 mt-1">' + esc(new Date(item.updatedAt).toLocaleString('zh-TW', {timeZone:'Asia/Taipei'})) + '</p>' +
+          '<p class="text-sm mt-2" style="white-space:pre-wrap;overflow-wrap:anywhere">' + esc(item.body) + '</p></article>';
+      }).join('') : '<p class="text-sm text-slate-500">目前沒有公告。</p>';
+      $('announcementRetry').classList.add('hidden');
+    }).catch(function () {
+      if (serial !== request) return;
+      target.textContent = '公告暫時無法載入，仍可使用驗證碼登入。';
+      $('announcementRetry').classList.remove('hidden');
+    });
+  };
+  function edit(item) {
+    editingId = item ? item.id : '';
+    $('announcementTitle').value = item ? item.title : '';
+    $('announcementBody').value = item ? item.body : '';
+    $('announcementPublished').checked = item ? item.published : false;
+    $('announcementMessage').textContent = '';
+  }
+  function render() {
+    $('announcementList').innerHTML = store.items.length ? store.items.map(function (item, i) {
+      return '<button class="btn btn-ghost" data-announcement="' + i + '">' +
+        esc((item.published ? '已發布：' : '草稿：') + item.title) + '</button>';
+    }).join('') : '<p class="text-sm text-slate-500">尚無公告，可撰寫第一則公告。</p>';
+    $('announcementSave').disabled = false;
+  }
+  function load() {
+    $('announcementSave').disabled = true;
+    return rpc('adminAnnouncements').then(function (data) { store = data; render(); edit(null); })
+      .catch(function (msg) { $('announcementMessage').textContent = msg; });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    $('announcementRetry').addEventListener('click', window.loadPublicAnnouncements);
+    $('announcementNew').addEventListener('click', function () { edit(null); });
+    $('announcementReload').addEventListener('click', load);
+    $('announcementList').addEventListener('click', function (event) {
+      var button = event.target.closest('[data-announcement]');
+      if (button && store) edit(store.items[Number(button.dataset.announcement)]);
+    });
+    $('announcementSave').addEventListener('click', function () {
+      if (!store) return;
+      var btn = $('announcementSave'), id = editingId;
+      setBusy(btn, true, '儲存中…');
+      rpc('saveAnnouncement', { id: id, revision: store.revision,
+        title: $('announcementTitle').value, body: $('announcementBody').value,
+        published: $('announcementPublished').checked }).then(function (data) {
+          store = data; render();
+          edit(id ? store.items.find(function (item) { return item.id === id; }) : store.items[store.items.length - 1]);
+          $('announcementMessage').textContent = '公告已儲存。';
+          window.loadPublicAnnouncements();
+        }).catch(function (msg) { $('announcementMessage').textContent = msg; })
+        .finally(function () { setBusy(btn, false); });
+    });
+    window.loadPublicAnnouncements();
+  });
+  window.PANEL_ON_SHOW = window.PANEL_ON_SHOW || {};
+  PANEL_ON_SHOW['admin.announcements'] = load;
+})();
+</script>
